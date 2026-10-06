@@ -29,6 +29,8 @@
 - 本机 `git` 不在 PATH：用 `<git>\cmd\git.exe`（版本段会随 GitHub Desktop 更新而变）。
 - 本机 `node` 不在 PATH：用 `$env:USERPROFILE\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\node\bin\node.exe`。
 - **改动 `desktop` profile 之前必须先备份 `~/.dsh/profiles/desktop/cordis.patch.yml`**；禁用插件一律写 `disabled: true`，不删文件。
+- **测试命令一律用 `& $node --test`（跑全套）或 `& $node --test <文件名>`（跑单个）。绝不要用目录形式 `node --test test/`** —— 本机 Node **v24.21.0** 会把目录当模块 `require`，报 `Cannot find module '<repo>\test'`，**测试文件根本不会加载**（拿到的是"测试没跑"而不是失败）。已实测：无参 ✔ / 指名文件 ✔ / 目录 ✖。
+- `pnpm-lock.yaml` **必须入库**：`@deepseek-ai/*` 依赖要可复现，且不入库会被后续任务的 `git add -A` 当未跟踪文件扫走。
 
 ---
 
@@ -221,7 +223,7 @@ $git = '<git>\cmd\git.exe'
   },
   "dsh": { "bundle": { "patch": "./cordis.patch.yml" } },
   "files": ["lib", "cordis.patch.yml", "README.md"],
-  "scripts": { "test": "node --test test/" },
+  "scripts": { "test": "node --test" },
   "peerDependencies": {
     "@deepseek-ai/cordis": "~4.0.4",
     "@deepseek-ai/schemastery": "~3.18.4",
@@ -309,7 +311,7 @@ test('半截 JSON 行不让整条链炸掉', () => {
 
 ```powershell
 $node = "$env:USERPROFILE\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\node\bin\node.exe"
-& $node --test test/ 2>&1 | Select-Object -Last 20
+& $node --test 2>&1 | Select-Object -Last 20
 ```
 Expected: FAIL — `Cannot find module '../lib/store.js'`
 
@@ -404,14 +406,14 @@ export function verifyChain(entries) {
 - [ ] **Step 5: 跑测试确认通过**
 
 ```powershell
-& $node --test test/ 2>&1 | Select-Object -Last 20
+& $node --test 2>&1 | Select-Object -Last 20
 ```
 Expected: PASS，4 个测试全绿。
 
 - [ ] **Step 6: Commit**
 
 ```powershell
-& $git -C '<repo>' add package.json lib/store.js test/store.test.js
+& $git -C '<repo>' add package.json pnpm-lock.yaml lib/store.js test/store.test.js
 & $git -C '<repo>' commit -m "feat(store): 审计流水 append-only + 哈希链 + 当月/上月读取"
 ```
 
@@ -493,7 +495,7 @@ import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 - [ ] **Step 2: 跑测试确认失败**
 
 ```powershell
-& $node --test test/ 2>&1 | Select-Object -Last 25
+& $node --test 2>&1 | Select-Object -Last 25
 ```
 Expected: FAIL — `writeJsonAtomic is not a function` 之类。
 
@@ -578,7 +580,7 @@ export function releaseLock(file) {
 - [ ] **Step 4: 跑测试确认通过**
 
 ```powershell
-& $node --test test/ 2>&1 | Select-Object -Last 25
+& $node --test 2>&1 | Select-Object -Last 25
 ```
 Expected: PASS，9 个测试全绿。
 
@@ -1418,7 +1420,7 @@ export function apply(ctx, config) {
 - [ ] **Step 5: 跑测试确认通过**
 
 ```powershell
-& $node --test test/ 2>&1 | Select-Object -Last 25
+& $node --test 2>&1 | Select-Object -Last 25
 ```
 Expected: PASS。
 
@@ -1606,7 +1608,7 @@ export async function dispatchRelay(ctx, config, { mainline, relayId, docPath, s
 - [ ] **Step 5: 跑测试确认通过**
 
 ```powershell
-& $node --test test/ 2>&1 | Select-Object -Last 25
+& $node --test 2>&1 | Select-Object -Last 25
 ```
 Expected: PASS，含"投递必须用 queue"这条。
 
@@ -1761,7 +1763,7 @@ function appendReminder(ctx, line) {
 - [ ] **Step 5: 跑测试确认通过**
 
 ```powershell
-& $node --test test/ 2>&1 | Select-Object -Last 25
+& $node --test 2>&1 | Select-Object -Last 25
 ```
 Expected: PASS。
 
