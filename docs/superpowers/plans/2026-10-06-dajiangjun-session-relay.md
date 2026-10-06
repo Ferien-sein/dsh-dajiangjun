@@ -100,7 +100,11 @@ dsh --profile steward-dev --from-default-profile web --no-open
 它会建 profile 并启动服务。等到 stderr 出现 `[hello-probe]` 或启动日志稳定后 `Ctrl+C`。
 Expected: `~/.dsh/profiles/steward-dev/package.json` 存在。
 
-如果 `--from-default-profile` 不接受 `--no-open`，去掉它并手动关掉浏览器标签。
+**两个已知坑，按需绕**：
+- **端口冲突**：正在跑的桌面宿主占着 19387。若这次 boot 报端口占用，给 app 传自己的端口（`--port 19399` 之类）——launcher 之后的参数会透传给 app。
+- **`--no-open` 不被接受**：去掉它，手动关掉弹出的浏览器标签。
+
+**判据是"目录建出来了"，不是"命令以 0 退出"**：这个 app 起服务后不会自己退，`Ctrl+C` 中断是预期终点。
 
 - [ ] **Step 3: 装探针插件**
 
@@ -109,6 +113,8 @@ dsh plugin --profile steward-dev add '<repo>\_scratch\hello'
 dsh plugin --profile steward-dev list --depth 0
 ```
 Expected: 列表里出现 `dsh-hello`。
+
+**若 pnpm 因 peer 依赖解析失败而拒绝**（这个探针包声明了 `@deepseek-ai/cordis` peer）：加 pnpm 的 `--no-strict-peer-dependencies` 重试，或干脆把探针包的 `peerDependencies` 删掉（它只是个探针，不 import 任何东西）。**判据是"插件行列进了配置树"，不是"用了哪条 pnpm 命令"。**
 
 - [ ] **Step 4: 验证插件行进了配置树**
 
@@ -196,7 +202,7 @@ $git = '<git>\cmd\git.exe'
   - `readAudit(home: string, months?: number, now?: Date): object[]`
   - `verifyChain(entries: object[]): { ok: boolean, brokenAt?: number, reason?: string }`
 
-- [ ] **Step 1: 建仓库根的 `package.json`**
+- [ ] **Step 1: 建仓库根的 `package.json`，并装上测试要用的两个包**
 
 ```json
 {
@@ -219,9 +225,26 @@ $git = '<git>\cmd\git.exe'
     "@deepseek-ai/schemastery": "~3.18.4",
     "@deepseek-ai/dsh-tools": "0.2.0-rc.2"
   },
+  "devDependencies": {
+    "@deepseek-ai/schemastery": "3.18.4",
+    "@deepseek-ai/dsh-tools": "0.2.0-rc.2"
+  },
   "engines": { "node": ">=20" }
 }
 ```
+
+`devDependencies` 不是可选项：`lib/index.js` 与测试都要 `import` 这两个包，它们必须能从**本仓库**的 `node_modules` 解析到（装进 profile 没用——那是宿主运行时的解析路径，不是 repo 的）。装：
+
+```powershell
+$node = "$env:USERPROFILE\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\node\bin\node.exe"
+$pnpm = '<dsh-install>\resources\runtime\pnpm\bin\pnpm.cjs'
+& $node $pnpm -C '<repo>' install
+```
+
+Expected: 仓库下出现 `node_modules/@deepseek-ai/{schemastery,dsh-tools}`。
+
+**若 install 失败**（`@deepseek-ai` scope 需要令牌）：改从 jsDelivr 拉这两个包的公开产物放进 `node_modules`（API 侦察阶段已用这条路拉到过 `.d.ts`，说明它们公开可读），并在 `docs/notes/dsh-api-notes.md` 里记下用的是哪条路。
+
 
 - [ ] **Step 2: 写失败的测试**
 
@@ -1395,12 +1418,9 @@ export function apply(ctx, config) {
 ```powershell
 & $node --test test/ 2>&1 | Select-Object -Last 25
 ```
-Expected: PASS。**若因 `@deepseek-ai/schemastery` / `@deepseek-ai/dsh-tools` 未安装而 import 失败**，先装：
+Expected: PASS。
 
-```powershell
-dsh plugin --profile steward-dev add '@deepseek-ai/schemastery@3.18.4'
-```
-并在仓库里建 `node_modules` 软链或直接 `pnpm add -D`（本机 pnpm 在 `<dsh-install>\resources\runtime\pnpm`）。**只装 peer，别装运行时依赖。**
+`@deepseek-ai/schemastery` 与 `@deepseek-ai/dsh-tools` 已在 Task 2 Step 1 装进本仓库。**若这里仍报解析不到**，说明 Task 2 Step 1 的 install 走了退路——照 `docs/notes/dsh-api-notes.md` 里记的那条路补齐，不要改成 `dsh plugin --profile ... add`（那是宿主运行时的解析路径，解决不了 repo 内 `import`）。
 
 - [ ] **Step 6: Commit**
 
