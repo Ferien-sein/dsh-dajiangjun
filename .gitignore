@@ -1,0 +1,13 @@
+# 调研期解包产物：asar 转储、官方 .d.ts 副本、槽位/事件清单
+# 全部可由 _scratch/asar.mjs 重新生成，不入库
+_scratch/
+
+# 依赖与构建产物
+node_modules/
+lib/types/*.map
+*.tgz
+
+# 编辑器 / 系统
+.DS_Store
+Thumbs.db
+*.log
