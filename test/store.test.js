@@ -1,9 +1,21 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { appendAudit, auditFile, hashEntry, readAudit, verifyChain } from '../lib/store.js'
+import {
+  acquireLock,
+  appendAudit,
+  auditFile,
+  hashEntry,
+  lockPath,
+  readAudit,
+  readJson,
+  releaseLock,
+  updateJson,
+  verifyChain,
+  writeJsonAtomic,
+} from '../lib/store.js'
 
 function home() {
   return mkdtempSync(path.join(tmpdir(), 'dj-store-'))
@@ -78,4 +90,45 @@ test('窗口验证：readAudit 默认只读两个月，必须用 seed 补上窗�
 
   const aug = readAudit(h, 12, new Date('2026-10-06T00:00:00.000Z')).find((r) => r.actionId === 'aug')
   assert.equal(verifyChain(window, aug.hash).ok, true)
+})
+
+test('updateJson 并发 100 次自增不丢更新', async () => {
+  const h = home()
+  const file = path.join(h, 'counter.json')
+  writeJsonAtomic(file, { n: 0 })
+  await Promise.all(Array.from({ length: 100 }, () => Promise.resolve().then(() => updateJson(file, (v) => ({ n: v.n + 1 })))))
+  assert.equal(readJson(file, { n: -1 }).n, 100)
+})
+
+test('writeJsonAtomic 留下完整 JSON，不留临时文件', () => {
+  const h = home()
+  const file = path.join(h, 'a.json')
+  writeJsonAtomic(file, { hello: '世界' })
+  assert.deepEqual(JSON.parse(readFileSync(file, 'utf8')), { hello: '世界' })
+  const leftovers = readdirSync(h).filter((f) => f.includes('.tmp-'))
+  assert.deepEqual(leftovers, [])
+})
+
+test('锁：抢不到返回 null', () => {
+  const h = home()
+  const lock = lockPath(h, 'relay-s1')
+  assert.ok(acquireLock(lock, { ttlMs: 60000, now: 1000 }))
+  assert.equal(acquireLock(lock, { ttlMs: 60000, now: 2000 }), null)
+})
+
+test('锁：过期可抢占并记 stole', () => {
+  const h = home()
+  const lock = lockPath(h, 'relay-s1')
+  acquireLock(lock, { ttlMs: 1000, now: 0 })
+  const got = acquireLock(lock, { ttlMs: 1000, now: 5000 })
+  assert.equal(got.ok, true)
+  assert.equal(got.stole, true)
+})
+
+test('锁：release 后可再抢', () => {
+  const h = home()
+  const lock = lockPath(h, 'relay-s1')
+  acquireLock(lock, { ttlMs: 1000, now: 0 })
+  releaseLock(lock)
+  assert.ok(acquireLock(lock, { ttlMs: 1000, now: 10 }))
 })
