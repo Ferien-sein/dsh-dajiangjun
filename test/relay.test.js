@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { parseDoc, resolveMainline, validateDoc } from '../lib/relay.js'
+import { checkForbidden, parseDoc, resolveMainline, validateDoc } from '../lib/relay.js'
 
 const GOOD = `# 头部
 主线: 大管家
@@ -65,4 +65,29 @@ test('主线名取值序：段1 → 文件名 → null', () => {
 
   assert.equal(resolveMainline(noHeader, 'C:/x/没有时间戳.md'), '没有时间戳')
   assert.equal(resolveMainline(noHeader, 'C:/x/.md'), null)
+})
+
+test('四类禁写各命中一例', () => {
+  const cases = [
+    ['凭据值', 'key = sk-abcdefghijklmnopqrstuvwxyz012345'],
+    ['内网地址', '服务在 http://192.168.1.20:3080 上'],
+    ['他人隐私', '联系 zhang.san@example.com 处理'],
+    ['会话原文', 'user: 帮我把这个改一下\nassistant: 好的，我这就改\nuser: 还有这个\nassistant: 也改了\nuser: 再检查一遍'],
+  ]
+  for (const [kind, text] of cases) {
+    const r = checkForbidden(text)
+    assert.equal(r.ok, false, `${kind} 没被拦住`)
+    assert.ok(r.hits.some((h) => h.kind === kind), `命中类目里没有 ${kind}`)
+  }
+})
+
+test('干净文本通过；回环地址不算内网', () => {
+  assert.equal(checkForbidden('服务在 http://127.0.0.1:19387/docs/notes.md 上').ok, true)
+  assert.equal(checkForbidden('见 docs/superpowers/specs/x.md 第 3 节').ok, true)
+})
+
+test('命中项不回显命中内容', () => {
+  const secret = 'sk-abcdefghijklmnopqrstuvwxyz012345'
+  const r = checkForbidden(`key = ${secret}`)
+  assert.equal(JSON.stringify(r).includes(secret), false)
 })
