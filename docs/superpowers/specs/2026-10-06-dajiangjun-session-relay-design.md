@@ -283,7 +283,7 @@ v1 的一切都是"agent 调工具、拿文本结果"。加 `lib/client.js` 要�
 | A4 | 投递后新会话自动开工 | **已验证（源码级）**，见决策稿 spike 结果；实跑复核 | 实现中 | 退回"建好会话 + 通知所有者点一下" |
 | A5 | 交接档路径在新会话沙箱内可读 | 实跑 | 实现中 | 改存工作区内 |
 | A6 | `sessionTitle.rename()` 在新会话上生效且不被自动刷新覆盖 | 实跑 | 实现中 | 不改标题（标题只是给人看的路标，不影响链） |
-| A7 | `inject` 数组的服务键名 | **已验证**（2026-10-06）：真名 = `tools` / `sessionController` / `sessionTitle` / `sessionProjections`（**复数**）/ `settings` / `llm`，6 键实测 `ctx.get()` 非 undefined 且源码 `super(ctx,"…")` 双确认（详见 `docs/notes/dsh-api-notes.md` §2） | 已完成 | — |
+| A7 | `inject` 数组的服务键名 | **已验证**（2026-10-06）：真名 = `tools` / `sessionController` / `sessionTitle` / `sessionProjections`（**复数**）/ `settings` / `llm`，6 键 inject 声明后 `ctx[k] !== undefined` 且源码 `super(ctx,"…")` 双确认（详见 `docs/notes/dsh-api-notes.md` §2） | 已完成 | — |
 | A8 | `system-prompt/assemble` 是 waterfall 且第三方可追加内容 | 最小插件试追加一行，看是否出现在 system prompt 里 | 实现中 | 退回"只写审计 + 工具返回值"，agent 仅在调工具时看到 |
 | A9 | 能取到当前模型的上下文上限（供算百分比） | 查 `ctx.llm` 的 `resolveModelInfo` 返回字段 | 实现中 | **不提醒**（不许猜分母） |
 | A10 | 新增插件行的生效时机（配置树 vs 插件代码） | **已验证**（2026-10-06）：`dsh plugin add` 后 `--dump-config` **立即**出 `- id: hello`，但**插件代码要到下次 boot 才加载**（详见 `docs/notes/dsh-api-notes.md` §5） | 已完成 | 影响"改了插件代码怎么生效"的操作预期——必须 boot 一次，不能指望热加载 |
