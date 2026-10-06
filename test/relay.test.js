@@ -106,3 +106,112 @@ test('命中项不回显命中内容', () => {
   const r = checkForbidden(`key = ${secret}`)
   assert.equal(JSON.stringify(r).includes(secret), false)
 })
+
+import { MODE_SEQ, dedupeKey, evaluateGates, permissionOk } from '../lib/relay.js'
+
+const cfg = { enabled: true, rateLimitMinutes: 20, failureLimit: 2, notify: {} }
+const base = {
+  config: cfg,
+  sourceSessionId: 'session-src',
+  mainline: '大管家',
+  docOk: true,
+  forbiddenOk: true,
+  auditRows: [],
+  permission: { sourceMode: 'workspace-write', targetMode: 'workspace-write' },
+  now: new Date('2026-10-06T12:00:00Z'),
+  isSubagent: false,
+}
+
+test('序表：字符串比较会反转，序表不会', () => {
+  assert.ok(MODE_SEQ['danger-full-access'] > MODE_SEQ['read-only'])
+  assert.ok(permissionOk('read-only', 'workspace-write'))
+  assert.ok(permissionOk('workspace-write', 'workspace-write'))
+  assert.equal(permissionOk('danger-full-access', 'read-only'), false)
+  assert.equal(permissionOk('workspace-write', 'unknown-mode'), false, '未知档位必须 fail-closed')
+})
+
+test('全部通过', () => {
+  assert.deepEqual(evaluateGates(base), { ok: true, code: 0 })
+})
+
+test('总开关关 → 拒且零副作用', () => {
+  const r = evaluateGates({ ...base, config: { ...cfg, enabled: false } })
+  assert.equal(r.ok, false)
+  assert.equal(r.gate, 'total-switch')
+  assert.equal(r.code, 5)
+})
+
+test('子代理发起 → 拒，退出码 2', () => {
+  const r = evaluateGates({ ...base, isSubagent: true })
+  assert.equal(r.ok, false)
+  assert.equal(r.gate, 'caller')
+  assert.equal(r.code, 2)
+})
+
+test('配置不可读 → 拒（不许当全放行）', () => {
+  const r = evaluateGates({ ...base, config: null })
+  assert.equal(r.ok, false)
+  assert.equal(r.gate, 'config-unreadable')
+  assert.equal(r.code, 5)
+})
+
+test('权限降级 → 拒，退出码 5', () => {
+  const r = evaluateGates({ ...base, permission: { sourceMode: 'danger-full-access', targetMode: 'workspace-write' } })
+  assert.equal(r.ok, false)
+  assert.equal(r.gate, 'permission')
+  assert.equal(r.code, 5)
+})
+
+test('权限未知 → 拒', () => {
+  const r = evaluateGates({ ...base, permission: null })
+  assert.equal(r.ok, false)
+  assert.equal(r.gate, 'permission')
+})
+
+test('速率闸：20 分钟内第二次同主线 → 拒', () => {
+  const rows = [{ actionId: 'relay', mainline: '大管家', dryRun: false, result: 'dispatched', ts: '2026-10-06T11:50:00.000Z' }]
+  const r = evaluateGates({ ...base, auditRows: rows })
+  assert.equal(r.ok, false)
+  assert.equal(r.gate, 'rate')
+})
+
+test('速率闸忽略 dryRun 行', () => {
+  const rows = [{ actionId: 'relay', mainline: '大管家', dryRun: true, result: 'preview', ts: '2026-10-06T11:59:00.000Z' }]
+  assert.equal(evaluateGates({ ...base, auditRows: rows }).ok, true)
+})
+
+test('失败闸：同主线连续失败 2 次 → 拒', () => {
+  const rows = [
+    { actionId: 'relay', mainline: '大管家', dryRun: false, result: 'failed', ts: '2026-10-06T10:00:00.000Z' },
+    { actionId: 'relay', mainline: '大管家', dryRun: false, result: 'failed', ts: '2026-10-06T11:00:00.000Z' },
+  ]
+  const r = evaluateGates({ ...base, auditRows: rows })
+  assert.equal(r.ok, false)
+  assert.equal(r.gate, 'failure')
+})
+
+test('去重闸：同一源会话已交接 → 拒', () => {
+  const rows = [{ actionId: 'relay', sourceSessionId: 'session-src', dryRun: false, result: 'dispatched', ts: '2026-10-01T00:00:00.000Z' }]
+  const r = evaluateGates({ ...base, auditRows: rows })
+  assert.equal(r.ok, false)
+  assert.equal(r.gate, 'dedupe')
+})
+
+test('档不合格 → 拒，退出码 5', () => {
+  const r = evaluateGates({ ...base, docOk: false })
+  assert.equal(r.gate, 'doc')
+  const r2 = evaluateGates({ ...base, forbiddenOk: false })
+  assert.equal(r2.gate, 'forbidden')
+})
+
+test('闸门顺序：总开关先于一切', () => {
+  const r = evaluateGates({ ...base, config: { ...cfg, enabled: false }, isSubagent: true, docOk: false })
+  assert.equal(r.gate, 'total-switch')
+})
+
+test('fail-closed 闸不受速率/失败闸计数影响', () => {
+  const rows = [{ actionId: 'relay', mainline: '大管家', dryRun: false, result: 'dispatched', ts: '2026-10-06T11:59:00.000Z' }]
+  const r = evaluateGates({ ...base, auditRows: rows, docOk: false })
+  // 顺序上 doc 在 rate 之前，所以报的是 doc
+  assert.equal(r.gate, 'doc')
+})
