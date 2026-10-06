@@ -92,11 +92,16 @@ test('窗口验证：readAudit 默认只读两个月，必须用 seed 补上窗�
   assert.equal(verifyChain(window, aug.hash).ok, true)
 })
 
-test('updateJson 并发 100 次自增不丢更新', async () => {
+// 注意：这条**不测并发**。Promise.all 里全是同步的 updateJson，Node 单线程逐个跑完，零交错；
+// 即便把 updateJson 退化成"非原子读 + 直接 writeFileSync"，计数照样是 100。
+// 它验证的是"连续 100 次读-改-写不丢更新、文件始终是完整 JSON"。
+// 跨进程的原子性**由调用方的锁负责**（见 lib/store.js 里 updateJson 的注释），本任务不提供该保证，
+// 也就不假造一个测试去暗示它成立。真要压并发得另起 worker_threads/子进程，已记入台账待办。
+test('updateJson 连续 100 次读-改-写不丢更新（进程内串行）', () => {
   const h = home()
   const file = path.join(h, 'counter.json')
   writeJsonAtomic(file, { n: 0 })
-  await Promise.all(Array.from({ length: 100 }, () => Promise.resolve().then(() => updateJson(file, (v) => ({ n: v.n + 1 })))))
+  for (let i = 0; i < 100; i++) updateJson(file, (v) => ({ n: v.n + 1 }))
   assert.equal(readJson(file, { n: -1 }).n, 100)
 })
 
@@ -111,24 +116,38 @@ test('writeJsonAtomic 留下完整 JSON，不留临时文件', () => {
 
 test('锁：抢不到返回 null', () => {
   const h = home()
-  const lock = lockPath(h, 'relay-s1')
-  assert.ok(acquireLock(lock, { ttlMs: 60000, now: 1000 }))
-  assert.equal(acquireLock(lock, { ttlMs: 60000, now: 2000 }), null)
+  assert.ok(acquireLock(h, 'relay-s1', { ttlMs: 60000, now: 1000 }))
+  assert.equal(acquireLock(h, 'relay-s1', { ttlMs: 60000, now: 2000 }), null)
 })
 
-test('锁：过期可抢占并记 stole', () => {
+test('锁：过期可抢占，且抢占必须留下审计行', () => {
   const h = home()
-  const lock = lockPath(h, 'relay-s1')
-  acquireLock(lock, { ttlMs: 1000, now: 0 })
-  const got = acquireLock(lock, { ttlMs: 1000, now: 5000 })
+  acquireLock(h, 'relay-s1', { ttlMs: 1000, now: 0 })
+  const got = acquireLock(h, 'relay-s1', { ttlMs: 1000, now: 5000 })
   assert.equal(got.ok, true)
   assert.equal(got.stole, true)
+
+  const rows = readAudit(h, 2, new Date(5000))
+  assert.equal(rows.length, 1, '抢占没有留下审计行（doc 02 §5.6 要求「抢占并记一行审计」）')
+  assert.equal(rows[0].actionId, 'lock-steal')
+  assert.equal(rows[0].result, 'stolen')
+  assert.equal(rows[0].reason, 'expired')
+})
+
+test('锁：损坏/半截的锁文件视为持有者已死，可被抢占（否则这把锁永久卡死）', () => {
+  const h = home()
+  acquireLock(h, 'relay-s1', { ttlMs: 60000, now: 0 })
+  writeFileSync(lockPath(h, 'relay-s1'), '{"pid":123,"started', 'utf8') // 进程在 create 与 write 之间崩了
+
+  const got = acquireLock(h, 'relay-s1', { ttlMs: 60000, now: 10 })
+  assert.equal(got.ok, true, '半截锁文件把锁永久锁死了：held 解析成 null 时 expired 恒为 false')
+  assert.equal(got.stole, true)
+  assert.equal(readAudit(h, 2, new Date(10))[0].reason, 'unreadable')
 })
 
 test('锁：release 后可再抢', () => {
   const h = home()
-  const lock = lockPath(h, 'relay-s1')
-  acquireLock(lock, { ttlMs: 1000, now: 0 })
-  releaseLock(lock)
-  assert.ok(acquireLock(lock, { ttlMs: 1000, now: 10 }))
+  acquireLock(h, 'relay-s1', { ttlMs: 1000, now: 0 })
+  releaseLock(h, 'relay-s1')
+  assert.ok(acquireLock(h, 'relay-s1', { ttlMs: 1000, now: 10 }))
 })
