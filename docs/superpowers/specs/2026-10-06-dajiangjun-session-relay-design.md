@@ -279,11 +279,11 @@ v1 的一切都是"agent 调工具、拿文本结果"。加 `lib/client.js` 要�
 |---|---|---|---|---|
 | A1 | 存在可用的"归档/处置空会话"API，供权限断言失败时使用 | 查 `archived-session-gate` 与 `sessionController` 方法清单 | 实现前 | 不建会话前先断言源会话档位；若预判会降级则**根本不建**，代价是漏掉"配置说 A 实际发 B"这一种情形 |
 | A2 | `agents.ensureSession()` 会连带挂上活代理（spike 残留风险） | 隔离 profile 实跑 | 实现中 | `prompt` 前显式确认会话可解析出 agent；不行则改用 `ctx.agents.create()` 低层 API |
-| A3 | 最小插件能装进隔离 profile 并拉起 | 装一个 hello 插件 → boot | **实现第一步** | 退回外部脚本 + HTTP（但需 GUI 令牌，成本高） |
+| A3 | 最小插件能装进隔离 profile 并拉起 | **已验证**（2026-10-06）：`dsh-hello` 装进 `steward-dev`，`dsh plugin list` 可见、`--dump-config` 出 `- id: hello`、boot 正常。新增插件：配置树立即生效，插件代码下次 boot 才加载（详见 `docs/notes/dsh-api-notes.md` §5） | 已完成 | 退回外部脚本 + HTTP（但需 GUI 令牌，成本高） |
 | A4 | 投递后新会话自动开工 | **已验证（源码级）**，见决策稿 spike 结果；实跑复核 | 实现中 | 退回"建好会话 + 通知所有者点一下" |
 | A5 | 交接档路径在新会话沙箱内可读 | 实跑 | 实现中 | 改存工作区内 |
 | A6 | `sessionTitle.rename()` 在新会话上生效且不被自动刷新覆盖 | 实跑 | 实现中 | 不改标题（标题只是给人看的路标，不影响链） |
-| A7 | `inject` 数组的服务键名 | 读各包 `package.json` 的服务声明 | 实现第一步 | — |
+| A7 | `inject` 数组的服务键名 | **已验证**（2026-10-06）：真名 = `tools` / `sessionController` / `sessionTitle` / `sessionProjections`（**复数**）/ `settings` / `llm`，6 键实测 `ctx.get()` 非 undefined 且源码 `super(ctx,"…")` 双确认（详见 `docs/notes/dsh-api-notes.md` §2） | 已完成 | — |
 | A8 | `system-prompt/assemble` 是 waterfall 且第三方可追加内容 | 最小插件试追加一行，看是否出现在 system prompt 里 | 实现中 | 退回"只写审计 + 工具返回值"，agent 仅在调工具时看到 |
 | A9 | 能取到当前模型的上下文上限（供算百分比） | 查 `ctx.llm` 的 `resolveModelInfo` 返回字段 | 实现中 | **不提醒**（不许猜分母） |
 
