@@ -86,6 +86,21 @@ test('干净文本通过；回环地址不算内网', () => {
   assert.equal(checkForbidden('见 docs/superpowers/specs/x.md 第 3 节').ok, true)
 })
 
+test('内网地址：公网链接放行、内网主机名拦住', () => {
+  // 公网文档链**不该**被当成内网地址。拦它没有任何安全收益——公网 URL 不泄漏内网拓扑；
+  // 代价却是合法交接档被判不合格、整条接力卡住，而上游设计把**误报率列为第一 KPI**。
+  assert.equal(checkForbidden('见 https://nodejs.org/api/ 的说明').ok, true)
+  assert.equal(checkForbidden('见 https://github.com/kira905/ops-handoff-design 的说明').ok, true)
+
+  // 真正的内网主机名要拦住：无点的裸主机名，与私有后缀
+  assert.equal(checkForbidden('服务在 http://my-nas/ 上').ok, false)
+  assert.equal(checkForbidden('服务在 http://storage.local/ 上').ok, false)
+  assert.equal(checkForbidden('服务在 http://box.lan/ 上').ok, false)
+
+  // 私网 IP 由同一类的另一条模式捕获，URL 模式**不重复覆盖**它
+  assert.equal(checkForbidden('服务在 http://192.168.1.20:3080 上').ok, false)
+})
+
 test('命中项不回显命中内容', () => {
   const secret = 'sk-abcdefghijklmnopqrstuvwxyz012345'
   const r = checkForbidden(`key = ${secret}`)
