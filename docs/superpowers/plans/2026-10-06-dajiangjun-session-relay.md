@@ -305,6 +305,37 @@ test('半截 JSON 行不让整条链炸掉', () => {
   const rows = readAudit(h, 2, new Date('2026-10-06T00:00:00.000Z'))
   assert.equal(rows.length, 1)
 })
+
+test('链跨月连续：跨月读取后 verifyChain 不误报', () => {
+  const h = home()
+  appendAudit(h, { ts: '2026-08-15T12:00:00.000Z', actionId: 'aug', dryRun: false })
+  appendAudit(h, { ts: '2026-09-15T12:00:00.000Z', actionId: 'sep', dryRun: false })
+  appendAudit(h, { ts: '2026-10-06T12:00:00.000Z', actionId: 'oct', dryRun: false })
+
+  const all = readAudit(h, 12, new Date('2026-10-06T00:00:00.000Z'))
+  assert.deepEqual(all.map((r) => r.actionId), ['aug', 'sep', 'oct'])
+  assert.equal(verifyChain(all).ok, true, '跨月链断了——新月份首行的 prevHash 没指向上月末行')
+
+  const oct = all.find((r) => r.actionId === 'oct')
+  const sep = all.find((r) => r.actionId === 'sep')
+  assert.equal(oct.prevHash, sep.hash)
+})
+
+test('窗口验证：readAudit 默认只读两个月，必须用 seed 补上窗口前那条的 hash', () => {
+  const h = home()
+  appendAudit(h, { ts: '2026-08-15T12:00:00.000Z', actionId: 'aug', dryRun: false })
+  appendAudit(h, { ts: '2026-09-15T12:00:00.000Z', actionId: 'sep', dryRun: false })
+  appendAudit(h, { ts: '2026-10-06T12:00:00.000Z', actionId: 'oct', dryRun: false })
+
+  const window = readAudit(h, 2, new Date('2026-10-06T00:00:00.000Z'))
+  assert.deepEqual(window.map((r) => r.actionId), ['sep', 'oct'])
+  // 不传 seed 时窗口首行注定对不上——这是有意的，不是 bug
+  assert.equal(verifyChain(window).ok, false)
+  assert.equal(verifyChain(window).brokenAt, 0)
+
+  const aug = readAudit(h, 12, new Date('2026-10-06T00:00:00.000Z')).find((r) => r.actionId === 'aug')
+  assert.equal(verifyChain(window, aug.hash).ok, true)
+})
 ```
 
 - [ ] **Step 3: 跑测试确认失败**
@@ -350,7 +381,7 @@ export function hashEntry(entry) {
   return createHash('sha256').update(canonical(entry)).digest('hex')
 }
 
-function lastHash(file) {
+function lastHashIn(file) {
   if (!existsSync(file)) return ''
   const lines = readFileSync(file, 'utf8').split('\n').filter(Boolean)
   if (lines.length === 0) return ''
@@ -361,10 +392,27 @@ function lastHash(file) {
   }
 }
 
+/**
+ * 链必须跨文件连续：本月文件为空则回溯上月，最多回看 maxBack 个月。
+ * 否则每个新月份文件的首行 prevHash 会是空串，而 readAudit 会把两个月拼成一个序列，
+ * verifyChain 就会在月边界必然误报一次断链（而 spec §8.1 规定断链 = 🔴）。
+ */
+function lastHash(home, date, maxBack = 12) {
+  const own = lastHashIn(auditFile(home, date))
+  if (own) return own
+  for (let i = 1; i <= maxBack; i++) {
+    const t = new Date(date.getFullYear(), date.getMonth() - i, 1)
+    const h = lastHashIn(auditFile(home, t))
+    if (h) return h
+  }
+  return ''
+}
+
 export function appendAudit(home, entry) {
-  const file = auditFile(home, entry.ts ? new Date(entry.ts) : new Date())
+  const date = entry.ts ? new Date(entry.ts) : new Date()
+  const file = auditFile(home, date)
   mkdirSync(path.dirname(file), { recursive: true })
-  const row = { ...entry, prevHash: lastHash(file), hash: '' }
+  const row = { ...entry, prevHash: lastHash(home, date), hash: '' }
   row.hash = hashEntry(row)
   appendFileSync(file, `${JSON.stringify(row)}\n`, 'utf8')
   return row
@@ -389,8 +437,14 @@ export function readAudit(home, months = 2, now = new Date()) {
   return out.sort((a, b) => String(a.ts).localeCompare(String(b.ts)))
 }
 
-export function verifyChain(entries) {
-  let prev = ''
+/**
+ * seed = 窗口之前那一条的 hash。因为 readAudit 默认只读两个月，
+ * 链在窗口之前可能已经开始——不传 seed 就只能验证"从链头开始"的序列。
+ * ponytail: 链的长度受保留文件数限制（超出 maxBack 的旧文件不参与），够用；
+ * 真要长期归档再引入外部锚点。
+ */
+export function verifyChain(entries, seed = '') {
+  let prev = seed
   for (let i = 0; i < entries.length; i++) {
     const e = entries[i]
     if ((e.prevHash ?? '') !== prev) return { ok: false, brokenAt: i, reason: 'prevHash mismatch' }
@@ -408,7 +462,7 @@ export function verifyChain(entries) {
 ```powershell
 & $node --test 2>&1 | Select-Object -Last 20
 ```
-Expected: PASS，4 个测试全绿。
+Expected: PASS，6 个测试全绿。
 
 - [ ] **Step 6: Commit**
 
@@ -582,7 +636,7 @@ export function releaseLock(file) {
 ```powershell
 & $node --test 2>&1 | Select-Object -Last 25
 ```
-Expected: PASS，9 个测试全绿。
+Expected: PASS，11 个测试全绿。
 
 - [ ] **Step 5: Commit**
 
