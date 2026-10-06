@@ -286,6 +286,8 @@ v1 的一切都是"agent 调工具、拿文本结果"。加 `lib/client.js` 要�
 | A7 | `inject` 数组的服务键名 | **已验证**（2026-10-06）：真名 = `tools` / `sessionController` / `sessionTitle` / `sessionProjections`（**复数**）/ `settings` / `llm`，6 键实测 `ctx.get()` 非 undefined 且源码 `super(ctx,"…")` 双确认（详见 `docs/notes/dsh-api-notes.md` §2） | 已完成 | — |
 | A8 | `system-prompt/assemble` 是 waterfall 且第三方可追加内容 | 最小插件试追加一行，看是否出现在 system prompt 里 | 实现中 | 退回"只写审计 + 工具返回值"，agent 仅在调工具时看到 |
 | A9 | 能取到当前模型的上下文上限（供算百分比） | 查 `ctx.llm` 的 `resolveModelInfo` 返回字段 | 实现中 | **不提醒**（不许猜分母） |
+| A10 | 新增插件行的生效时机（配置树 vs 插件代码） | **已验证**（2026-10-06）：`dsh plugin add` 后 `--dump-config` **立即**出 `- id: hello`，但**插件代码要到下次 boot 才加载**（详见 `docs/notes/dsh-api-notes.md` §5） | 已完成 | 影响"改了插件代码怎么生效"的操作预期——必须 boot 一次，不能指望热加载 |
+| A11 | `ctx.inject(deps, cb)` 迟绑定可用（服务就绪后回调、缺服务则静默不注册） | 按 `dsh-plugin-notify-sound` 的现存用法实现，Task 9 实测 | Task 9 | 退回可选链 + 把该服务写进顶层 `inject`（代价：缺服务会导致整个插件不激活） |
 
 ---
 

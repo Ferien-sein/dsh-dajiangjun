@@ -171,7 +171,9 @@ ctx.tools.register(defineTool({
 
 - [ ] **Step 8: 更新 spec 的假设表**
 
-把 §10 的 A3（最小插件能装进隔离 profile 并拉起）、A7（`inject` 服务键名）标为**已验证**并附结论；A6（热加载）按 Step 7 的结论标注。
+把 §10 的 **A3**（最小插件能装进隔离 profile 并拉起）、**A7**（`inject` 服务键名）、**A10**（新增插件行的生效时机：配置树立即生效、插件代码下次 boot 才加载）标为**已验证**并附结论。
+
+**A6**（`sessionTitle.rename()` 在新会话上生效）本任务**没有**实测，保持原状不要动它。新增的 A10 是热加载那条事实的归属，不是 A6。
 
 - [ ] **Step 9: Commit**
 
@@ -1714,32 +1716,47 @@ export function shouldNotify(state, { now, pct, config }) {
 
 - [ ] **Step 4: 接进 `apply`**
 
-在 `apply` 里加订阅（`system-prompt/assemble` 的确切签名以 Task 1 笔记为准；本步骤按"能往系统提示追加一行"的最小用法写）：
+在 `apply` 里加订阅。**`llm` 用迟绑定，不要写进顶层 `inject`**：DSH 的 `inject` 语义是"缺服务则不激活"，为一个可选读操作赌整个插件不激活不划算。本机已发布的 `dsh-plugin-notify-sound` 就是这么写的（`ctx.inject(['settings'], (sctx) => …)`），照这个模式：
 
 ```js
-  ctx.effect(() => ctx.on('assistant/message', (payload) => {
-    if (config?.notify?.enabled !== true) return
-    const usage = payload?.message?.usage ?? payload?.usage
-    const limit = ctx.llm?.resolveModelInfo?.(payload?.provider, payload?.model)?.contextWindow
-    if (!usage || !limit) return // A9：取不到分母就不提醒，不许猜
-    const pct = (usage.inputTokens ?? 0) / limit
-    if (pct < (config.softLimitRatio ?? 0.7)) return
-    const stateFile = `${dshHome()}\\steward\\notify-state.json`
-    const state = readJson(stateFile, {})
-    const now = new Date()
-    if (!shouldNotify(state, { now, pct, config: config.notify })) return
-    updateJson(stateFile, () => ({
-      lastPct: pct,
-      lastAt: now.toISOString(),
-      today: dayKey(now),
-      todayCount: (state.today === dayKey(now) ? (state.todayCount ?? 0) : 0) + 1,
-    }))
-    appendAudit(dshHome(), { ts: now.toISOString(), actor: 'plugin', actionId: 'notify', dryRun: false, result: 'sent', pct })
-    ctx.systemPrompt?.append?.(notifyLine(pct))
-  }))
+  ctx.inject(['llm'], (sctx) => {
+    sctx.on('assistant/message', (payload) => {
+      if (config?.notify?.enabled !== true) return
+      const usage = payload?.message?.usage ?? payload?.usage
+      const limit = sctx.llm?.resolveModelInfo?.(payload?.provider, payload?.model)?.contextWindow
+      if (!usage || !limit) return // A9：取不到分母就不提醒，不许猜
+      const pct = (usage.inputTokens ?? 0) / limit
+      if (pct < (config.softLimitRatio ?? 0.7)) return
+      const stateFile = `${dshHome()}\\steward\\notify-state.json`
+      const state = readJson(stateFile, {})
+      const now = new Date()
+      if (!shouldNotify(state, { now, pct, config: config.notify })) return
+      updateJson(stateFile, () => ({
+        lastPct: pct,
+        lastAt: now.toISOString(),
+        today: dayKey(now),
+        todayCount: (state.today === dayKey(now) ? (state.todayCount ?? 0) : 0) + 1,
+      }))
+      appendAudit(dshHome(), { ts: now.toISOString(), actor: 'plugin', actionId: 'notify', dryRun: false, result: 'sent', pct })
+      appendReminder(sctx, notifyLine(pct))
+    })
+  })
 ```
 
-**若 `system-prompt/assemble`（waterfall）是唯一可用的追加位**：改成 `ctx.on('system-prompt/assemble', (payload, next) => { ...; const out = next(); return out + '\n' + line })`——**以 Task 1 笔记的实测签名为准，两者不可混用**。
+`appendReminder(ctx, line)` 是**追加那一行的唯一实现**，它怎么追加取决于 A8 的实测结论（见下）。
+
+**`system-prompt/assemble` 与 `ctx.systemPrompt` 二者取一，以 `docs/notes/dsh-api-notes.md` 的实测为准，不可混用**：若 notes 显示 waterfall 可用，则
+
+```js
+function appendReminder(ctx, line) {
+  ctx.on('system-prompt/assemble', (payload, next) => {
+    const out = next()
+    return out === undefined ? undefined : `${out}\n${line}`
+  })
+}
+```
+否则用 `ctx.systemPrompt?.append?.(line)`。**若两条路都走不通**，把提醒降级为"只写审计 + 工具返回值"，并在报告里说明——不要留一个静默不生效的订阅。
+
 
 - [ ] **Step 5: 跑测试确认通过**
 
