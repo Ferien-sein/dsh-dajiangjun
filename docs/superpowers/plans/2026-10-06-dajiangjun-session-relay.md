@@ -485,8 +485,8 @@ Expected: PASS，6 个测试全绿。
   - `writeJsonAtomic(file: string, value: unknown): void`
   - `readJson(file: string, fallback: unknown): unknown`
   - `updateJson(file: string, fn: (v: any) => any): void`
-  - `acquireLock(file: string, opts: { ttlMs: number, now?: number }): { ok: true, stole: boolean } | null`
-  - `releaseLock(file: string): void`
+  - `acquireLock(home: string, key: string, opts?: { ttlMs: number, now?: number }): { ok: true, stole: boolean } | null` —— **抢占成功时在函数内部**向审计流水追加一行 `actionId: 'lock-steal'`
+  - `releaseLock(home: string, key: string): void`
   - `lockPath(home: string, key: string): string`
 
 - [ ] **Step 1: 写失败的测试**
@@ -496,11 +496,16 @@ Expected: PASS，6 个测试全绿。
 ```js
 import { acquireLock, lockPath, releaseLock, updateJson, writeJsonAtomic } from '../lib/store.js'
 
-test('updateJson 并发 100 次自增不丢更新', async () => {
+// 注意：这条**不测并发**。Promise.all 里全是同步的 updateJson，Node 单线程逐个跑完，零交错；
+// 即便把 updateJson 退化成"非原子读 + 直接 writeFileSync"，计数照样是 100。
+// 它验证的是"连续 100 次读-改-写不丢更新、文件始终是完整 JSON"。
+// 跨进程的原子性**由调用方的锁负责**（见 lib/store.js 里 updateJson 的注释），本任务不提供该保证，
+// 也就不假造一个测试去暗示它成立。真要压并发得另起 worker_threads/子进程，已记入台账待办。
+test('updateJson 连续 100 次读-改-写不丢更新（进程内串行）', () => {
   const h = home()
   const file = path.join(h, 'counter.json')
   writeJsonAtomic(file, { n: 0 })
-  await Promise.all(Array.from({ length: 100 }, () => Promise.resolve().then(() => updateJson(file, (v) => ({ n: v.n + 1 })))))
+  for (let i = 0; i < 100; i++) updateJson(file, (v) => ({ n: v.n + 1 }))
   assert.equal(readJson(file, { n: -1 }).n, 100)
 })
 
@@ -515,26 +520,40 @@ test('writeJsonAtomic 留下完整 JSON，不留临时文件', () => {
 
 test('锁：抢不到返回 null', () => {
   const h = home()
-  const lock = lockPath(h, 'relay-s1')
-  assert.ok(acquireLock(lock, { ttlMs: 60000, now: 1000 }))
-  assert.equal(acquireLock(lock, { ttlMs: 60000, now: 2000 }), null)
+  assert.ok(acquireLock(h, 'relay-s1', { ttlMs: 60000, now: 1000 }))
+  assert.equal(acquireLock(h, 'relay-s1', { ttlMs: 60000, now: 2000 }), null)
 })
 
-test('锁：过期可抢占并记 stole', () => {
+test('锁：过期可抢占，且抢占必须留下审计行', () => {
   const h = home()
-  const lock = lockPath(h, 'relay-s1')
-  acquireLock(lock, { ttlMs: 1000, now: 0 })
-  const got = acquireLock(lock, { ttlMs: 1000, now: 5000 })
+  acquireLock(h, 'relay-s1', { ttlMs: 1000, now: 0 })
+  const got = acquireLock(h, 'relay-s1', { ttlMs: 1000, now: 5000 })
   assert.equal(got.ok, true)
   assert.equal(got.stole, true)
+
+  const rows = readAudit(h, 2, new Date(5000))
+  assert.equal(rows.length, 1, '抢占没有留下审计行（doc 02 §5.6 要求「抢占并记一行审计」）')
+  assert.equal(rows[0].actionId, 'lock-steal')
+  assert.equal(rows[0].result, 'stolen')
+  assert.equal(rows[0].reason, 'expired')
+})
+
+test('锁：损坏/半截的锁文件视为持有者已死，可被抢占（否则这把锁永久卡死）', () => {
+  const h = home()
+  acquireLock(h, 'relay-s1', { ttlMs: 60000, now: 0 })
+  writeFileSync(lockPath(h, 'relay-s1'), '{"pid":123,"started', 'utf8') // 进程在 create 与 write 之间崩了
+
+  const got = acquireLock(h, 'relay-s1', { ttlMs: 60000, now: 10 })
+  assert.equal(got.ok, true, '半截锁文件把锁永久锁死了：held 解析成 null 时 expired 恒为 false')
+  assert.equal(got.stole, true)
+  assert.equal(readAudit(h, 2, new Date(10))[0].reason, 'unreadable')
 })
 
 test('锁：release 后可再抢', () => {
   const h = home()
-  const lock = lockPath(h, 'relay-s1')
-  acquireLock(lock, { ttlMs: 1000, now: 0 })
-  releaseLock(lock)
-  assert.ok(acquireLock(lock, { ttlMs: 1000, now: 10 }))
+  acquireLock(h, 'relay-s1', { ttlMs: 1000, now: 0 })
+  releaseLock(h, 'relay-s1')
+  assert.ok(acquireLock(h, 'relay-s1', { ttlMs: 1000, now: 10 }))
 })
 ```
 
@@ -610,8 +629,15 @@ export function lockPath(home, key) {
   return path.join(home, 'steward', 'locks', `${key}.lock`)
 }
 
-/** 原子创建（flag:'wx'），禁止 existsSync-then-write（TOCTOU，spec R-4）。 */
-export function acquireLock(file, { ttlMs, now = Date.now() }) {
+/**
+ * 原子创建（flag:'wx'），禁止 existsSync-then-write（TOCTOU，spec R-4）。
+ *
+ * 签名收 `home` + `key` 而不是裸路径，是**刻意的**：doc 02 §5.6 要求「抢占并记一行审计」，
+ * 而写审计需要 `home`。收不收 `home` 决定了"抢占能不能悄悄发生而不留痕"——收进来，
+ * 审计就在同一个函数里，不依赖任何调用点记得补一行。
+ */
+export function acquireLock(home, key, { ttlMs, now = Date.now() } = {}) {
+  const file = lockPath(home, key)
   mkdirSync(path.dirname(file), { recursive: true })
   try {
     writeFileSync(file, JSON.stringify({ pid: process.pid, startedAt: now, ttl: ttlMs }), { flag: 'wx' })
@@ -619,15 +645,37 @@ export function acquireLock(file, { ttlMs, now = Date.now() }) {
   } catch (error) {
     if (error.code !== 'EEXIST') throw error
   }
+
   const held = readJson(file, null)
-  const expired = held && typeof held.startedAt === 'number' && now - held.startedAt > (held.ttl ?? ttlMs)
-  if (!expired) return null
+  // held === null 覆盖两种情形：文件为空/半截（进程在 create 与 write 之间崩了），
+  // 或内容不可解析。两者都说明持有者已死。若不这样看待，`expired` 会恒为 false，
+  // 这把锁就**永远**抢不到了——活性故障比崩溃更难查。
+  const unreadable = held === null || typeof held.startedAt !== 'number'
+  const expired = !unreadable && now - held.startedAt > (held.ttl ?? ttlMs)
+  if (!unreadable && !expired) return null
+
   writeJsonAtomic(file, { pid: process.pid, startedAt: now, ttl: ttlMs, stoleFrom: held })
+  appendAudit(home, {
+    ts: new Date(now).toISOString(),
+    actor: 'plugin',
+    actionId: 'lock-steal',
+    dryRun: false,
+    result: 'stolen',
+    lock: key,
+    reason: unreadable ? 'unreadable' : 'expired',
+    stoleFrom: held,
+  })
   return { ok: true, stole: true }
 }
 
-export function releaseLock(file) {
-  try { rmSync(file, { force: true }) } catch {}
+export function releaseLock(home, key) {
+  try {
+    rmSync(lockPath(home, key), { force: true })
+  } catch (error) {
+    // 非 ENOENT（EACCES/EBUSY）说明锁没删掉：它是活锁，靠 ttl 兜底。
+    // 但**不许静默**——这条路以前 `catch {}` 吞掉一切，与"静默失效必须可观测"冲突。
+    if (error.code !== 'ENOENT') process.emitWarning(`steward: releaseLock 未能删除锁 ${key}: ${error.code}`)
+  }
 }
 ```
 
@@ -636,7 +684,7 @@ export function releaseLock(file) {
 ```powershell
 & $node --test 2>&1 | Select-Object -Last 25
 ```
-Expected: PASS，11 个测试全绿。
+Expected: PASS，12 个测试全绿。
 
 - [ ] **Step 5: Commit**
 
@@ -1496,7 +1544,7 @@ Expected: PASS。
 - Modify: `test/index.test.js`
 
 **Interfaces:**
-- Consumes: Task 3 的 `acquireLock` / `releaseLock` / `lockPath`；Task 1 笔记里的服务键名
+- Consumes: Task 3 的 `acquireLock(home, key, opts)` / `releaseLock(home, key)`（抢占的审计行由 `acquireLock` 自己写，调用点不必补）；Task 1 笔记里的服务键名
 - Produces: `dispatchRelay(ctx, config, { mainline, relayId, docPath, sourceSessionId, text })` —— 执行 §3 的 ⑦–⑫ 步
 
 - [ ] **Step 1: 写失败的测试**
@@ -1570,7 +1618,7 @@ Expected: FAIL — `dispatchRelay is not a function`
 
 - [ ] **Step 3: 实现 `dispatchRelay`**
 
-追加到 `lib/index.js`（把 `acquireLock`、`releaseLock`、`lockPath`、`writeTextAtomic` 加进 `./store.js` 的导入，把 `permissionOk` 加进 `./relay.js` 的导入，并在顶部补 `import { readFileSync } from 'node:fs'`）：
+追加到 `lib/index.js`（把 `acquireLock`、`releaseLock`、`writeTextAtomic` 加进 `./store.js` 的导入，把 `permissionOk` 加进 `./relay.js` 的导入，并在顶部补 `import { readFileSync } from 'node:fs'`）：
 
 ```js
 /** 把接力元信息回写到档的「头部」段末尾（spec §3 步骤 ⑪）。先剔除旧键再插入 → 幂等。 */
@@ -1590,11 +1638,12 @@ function rewriteHeader(text, { relayId, sessionId, at }) {
 
 export async function dispatchRelay(ctx, config, { mainline, relayId, docPath, sourceSessionId, text }) {
   const home = dshHome()
-  const lock = lockPath(home, `relay-${sourceSessionId}`)
+  const lockKey = `relay-${sourceSessionId}`
   const audit = (row) =>
     appendAudit(home, { ts: new Date().toISOString(), actor: 'agent', actionId: 'relay', dryRun: false, mainline, sourceSessionId, relayId, ...row })
 
-  const got = acquireLock(lock, { ttlMs: config.lockTtlMs ?? 120000 })
+  // 抢占的审计行由 acquireLock 自己写（doc 02 §5.6），调用点不需要补
+  const got = acquireLock(home, lockKey, { ttlMs: config.lockTtlMs ?? 120000 })
   if (!got) {
     audit({ result: 'skipped', gate: 'single-flight' })
     return { kind: 'skipped', exitCode: 0, relayId, gate: 'single-flight', message: '已有同源会话的接力在进行，本次静默退出。' }
@@ -1640,7 +1689,7 @@ export async function dispatchRelay(ctx, config, { mainline, relayId, docPath, s
     audit({ result: 'failed', newSessionId: newId, error: String(error?.message ?? error) })
     return { kind: 'partial', exitCode: newId ? 3 : 1, relayId, message: `接力中断：${String(error?.message ?? error)}` }
   } finally {
-    releaseLock(lock)
+    releaseLock(home, lockKey)
   }
 }
 ```
