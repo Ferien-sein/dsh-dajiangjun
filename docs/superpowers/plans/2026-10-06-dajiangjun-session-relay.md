@@ -1619,9 +1619,14 @@ test('回写档头：三个键进「头部」段，且重复执行不堆叠', as
   assert.ok(/^\s*链:\s*relay-session-src-/m.test(first))
   assert.ok(/^\s*接手会话:\s*session-new\s*$/m.test(first))
 
-  await dispatchRelay(ctx, CFG, callArgs(docPath, 1))
+  // 第二次必须喂**改后**的档文本（从磁盘读回来），否则 rewriteHeader 的去重分支根本没被走到：
+  // 喂原始 GOOD_DOC 的话结果是从原文本重新生成，永远只有一条链键 → 断言恒真、删掉过滤也能过。
+  // 生产路径 runRelay 正是从磁盘读档，所以第二次读到的文本**含**上次写的键——那条过滤真的在承重。
+  await dispatchRelay(ctx, CFG, { ...callArgs(docPath, 1), text: readFileSync(docPath, 'utf8') })
   const second = readFileSync(docPath, 'utf8')
   assert.equal((second.match(/^\s*链:/gm) ?? []).length, 1, '链键被堆叠了')
+  assert.equal((second.match(/^\s*接手会话:/gm) ?? []).length, 1, '接手会话键被堆叠了')
+  assert.equal((second.match(/^\s*已交接:/gm) ?? []).length, 1, '已交接键被堆叠了')
 })
 ```
 
@@ -1710,7 +1715,13 @@ export async function dispatchRelay(ctx, config, { mainline, relayId, docPath, s
     return { kind: 'dispatched', exitCode: 0, relayId, message: `已派发。新会话 ${newId}，链标识 ${relayId}。` }
   } catch (error) {
     audit({ result: 'failed', newSessionId: newId, error: String(error?.message ?? error) })
-    return { kind: 'partial', exitCode: newId ? 3 : 1, relayId, message: `接力中断：${String(error?.message ?? error)}` }
+    // 失败发生在 create() 之后就**必须点名那个会话**：它可能已经收到投递。
+    // 不点名的后果是具体且危险的——去重闸只认 result === 'dispatched' 的行，
+    // 所以人工在不知情下重试会**再投一次**，而那个已投递的会话没人能指认（Ruling 24）。
+    const orphan = newId
+      ? `已建会话 ${newId}（失败可能发生在其收到投递之后），请人工核查该会话再决定是否重试；`
+      : ''
+    return { kind: 'partial', exitCode: newId ? 3 : 1, relayId, message: `接力中断：${String(error?.message ?? error)}。${orphan}链标识 ${relayId}。` }
   } finally {
     releaseLock(home, lockKey)
   }
