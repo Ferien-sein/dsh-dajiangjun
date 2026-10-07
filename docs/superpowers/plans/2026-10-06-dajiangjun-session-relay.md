@@ -2069,26 +2069,43 @@ export declare function apply(ctx: Context, config: any): void
 
 - [ ] **Step 2: 装进隔离 profile 并跑真链**
 
-```powershell
-dsh plugin --profile steward-dev add '<repo>'
-dsh --profile steward-dev
-```
-在界面里开一个会话，让 agent 写一份合格交接档，然后调 `steward_relay({ docPath: '...' })` 看预览，再调 `steward_relay({ docPath: '...', dryRun: false })`。
+**优先走非交互路线。本步骤必须尽量不依赖人肉点 GUI。**
 
-Expected:
-- 预览返回 `kind: 'preview'` 且**没有**新会话出现
+先试 headless（`dsh headless "<task>"` 会答一个任务、打印结果、然后退出）：
+
+```powershell
+dsh plugin --profile headless add '<repo>'
+dsh headless "先写一份合格的七段交接档到 <临时路径>，然后调用 steward_relay 工具：先不带 dryRun 参数预览，再带 dryRun:false 真执行。把两次的工具返回原文打印出来。"
+```
+
+若 `headless` profile 存在且能装上本插件，**这条就能无人值守地把真链跑完并打印结果——这是首选路线。**
+
+**若 headless 不可用**（profile 不存在 / 装不进 / 驱动不了工具 / 拿不到可观测输出），**不要**改用"打开 GUI 点点看"去凑证据，**也不要**用别的间接信号代替。**停下来报 BLOCKED**，说清卡在哪一步、试了什么、需要什么。端到端验证需要人肉介入时，协调它是控制方与使用者的事，不是你硬凑的范围。
+
+**绝不允许**（任一违反即视为伪造证据）：
+- 把没跑过的链写成跑过了
+- 把单元测试通过当成端到端通过
+- 把"预览返回了 `preview`"当成"新会话真的自己开工了"
+
+Expected（能跑到哪条就报哪条，跑不到的照实写"未验证"）：
+- 预览返回 `kind: 'preview'`，且**没有**新会话出现
 - 真执行返回 `kind: 'dispatched'`
 - 出现一个标题为 `【续】<主线名>` 的新会话
-- 该新会话**自己开始跑**（状态 `running`，随后有 assistant 产出）← **这是 v1 的存在理由，必须亲眼看到**
+- 该新会话**自己开始跑**（状态 `running`，随后有 assistant 产出）← **这是 v1 的存在理由，必须真的看到**
 - `~/.dsh/steward/audit/<当月>.jsonl` 多出一行 `result: 'dispatched'`
+- 若插件在 profile 里起不来：先看宿主日志；**装在隔离 profile 里起不来不算阻塞**，是 Step 1 该查清的东西，照实报告即可
 
 - [ ] **Step 3: 失败注入三例**
 
-| # | 注入 | 期望 |
-|---|---|---|
-| 1 | 投递前杀进程（新会话已建、未投递） | 审计无 `dispatched`；退出码 3 或 5；档头无回写；重跑因去重键未命中而**允许**再试 |
-| 2 | `docPath` 指向不存在的文件 | `kind: 'rejected'`、`exitCode: 5`、`gate: 'doc'`、**零新会话** |
-| 3 | 在只读档位的会话里调用 | `gate: 'permission'`、`exitCode: 5`、**未投递**、已建会话留痕待人工处置 |
+| # | 注入 | 期望 | 无人值守可复现？ |
+|---|---|---|---|
+| 1 | 投递前杀进程（新会话已建、未投递） | 审计无 `dispatched`；退出码 3 或 5；档头无回写；重跑因去重键未命中而**允许**再试 | 难——要精确掐在 create 与 prompt 之间 |
+| 2 | `docPath` 指向不存在的文件 | `kind: 'rejected'`、`exitCode: 5`、`gate: 'doc'`、**零新会话** | **容易**，且完全不产生副作用 |
+| 3 | 在只读档位的会话里调用 | `gate: 'permission'`、`exitCode: 5`、**未投递**、已建会话留痕待人工处置 | 需能指定沙箱档位起会话 |
+
+**#2 必做**（走 rejection 分支、零副作用，无人值守最容易复现）。#1 与 #3 能通过 headless/脚本复现就做；**做不到就如实写"未能验证"，并说明缺什么条件**——**不要**用改代码、打桩或手工构造返回值来伪造这三条。
+
+这一节的价值不是"三条都绿"，而是**如实说清哪几条在无人值守下复现得了**。
 
 - [ ] **Step 4: 记下实测结论并更新 spec**
 
