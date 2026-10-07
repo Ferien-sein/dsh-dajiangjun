@@ -317,6 +317,8 @@ v1 的一切都是"agent 调工具、拿文本结果"。加 `lib/client.js` 要�
 | 3 | `dispatchRelay` 命名 | `sessionTitle.rename(newId, …)` | `rename(session, title)`，第一参是 session 对象 | `session "undefined" is not live` |
 | 4 | `dispatchRelay` 投递 | `sessionController.prompt(req)` 少传 signal | `prompt(request, signal)`，signal 是 @Remote 取消参数 | `reading 'throwIfAborted'` |
 
+**第 5 处（Ruling 34，非 API 形状，是顺序）**：`runRelay` 在 `evaluateGates` **之前**就 `readFileSync`，于是总开关关着时仍读档、写审计、返回误导性的"读不到交接档"而非"未启用"——违反 §1 G8「关闭时零副作用」。已修：`relay.js` 抽出 `preflightGates`（配置不可读 / 总开关 / 调用者三道，无 I/O 无副作用），`runRelay` 在读档前先跑它、不通过则直接返回不落审计；`evaluateGates` 首行调用同一实现。测试改写为「总开关关闭时拒且真正的零副作用（未读档、未留审计）」——传不存在路径，钉死"先查开关"顺序（RED 时拿到 `doc` 而非 `total-switch`）。
+
 **失败注入**：
 - #2（`docPath` 不存在）✅ 已复现：工具返回 `读不到交接档：…`（`gate: 'doc'` 分支），**零新会话**；修复后该拒绝路径也落审计行（`reason: 'doc-unreadable'`）。
 - #1（投递前杀进程）、#3（只读源会话）**未验证**：需精确掐 create↔prompt 之间（#1）或指定只读档位起会话（#3），本机无法无人值守复现。
