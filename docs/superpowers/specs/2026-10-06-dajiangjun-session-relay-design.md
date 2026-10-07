@@ -284,10 +284,10 @@ v1 的一切都是"agent 调工具、拿文本结果"。加 `lib/client.js` 要�
 | A5 | 交接档路径在新会话沙箱内可读 | 实跑 | 实现中 | 改存工作区内 |
 | A6 | `sessionTitle.rename()` 在新会话上生效且不被自动刷新覆盖 | 实跑 | 实现中 | 不改标题（标题只是给人看的路标，不影响链） |
 | A7 | `inject` 数组的服务键名 | **已验证**（2026-10-06）：真名 = `tools` / `sessionController` / `sessionTitle` / `sessionProjections`（**复数**）/ `settings` / `llm`，6 键 inject 声明后 `ctx[k] !== undefined` 且源码 `super(ctx,"…")` 双确认（详见 `docs/notes/dsh-api-notes.md` §2） | 已完成 | — |
-| A8 | `system-prompt/assemble` 是 waterfall 且第三方可追加内容 | 最小插件试追加一行，看是否出现在 system prompt 里 | 实现中 | 退回"只写审计 + 工具返回值"，agent 仅在调工具时看到 |
-| A9 | 能取到当前模型的上下文上限（供算百分比） | 查 `ctx.llm` 的 `resolveModelInfo` 返回字段 | 实现中 | **不提醒**（不许猜分母） |
+| A8 | `system-prompt/assemble` 是 waterfall 且第三方可追加内容 | **已验证（源码级，Task 9）**：`dsh-system-prompt/lib/index.js:355` 的 `ctx.waterfall(scopeTarget(this, scope), "system-prompt/assemble", assembly, context, …)`；载荷是 `assembly` 对象（不是字符串），监听签名 `(assembly, context, next)`，追加 = 往 `assembly.sections` 推新 section。`ctx.systemPrompt.append()` **不存在**（方法只有 `section/context/tools/variable/assemble/…`）。见 `docs/notes/dsh-api-notes.md` §7 | 已完成 | 退回"只写审计 + 工具返回值"，agent 仅在调工具时看到 |
+| A9 | 能取到当前模型的上下文上限（供算百分比） | **已验证（源码级，Task 9）**：`dsh-llm/lib/index.js:2098` `async resolveModelInfo(provider, model, signal)`，返回 `context.contextWindow`（`:2124`，**嵌套字段、非顶层**）；`usage` 字段为 camelCase `inputTokens/outputTokens`（`typert.host.js:529`）。取不到就**不提醒**。见 notes §8 | 已完成 | **不提醒**（不许猜分母） |
 | A10 | 新增插件行的生效时机（配置树 vs 插件代码） | **已验证**（2026-10-06）：`dsh plugin add` 后 `--dump-config` **立即**出 `- id: hello`，但**插件代码要到下次 boot 才加载**（详见 `docs/notes/dsh-api-notes.md` §5） | 已完成 | 影响"改了插件代码怎么生效"的操作预期——必须 boot 一次，不能指望热加载 |
-| A11 | `ctx.inject(deps, cb)` 迟绑定可用（服务就绪后回调、缺服务则静默不注册） | 按 `dsh-plugin-notify-sound` 的现存用法实现，Task 9 实测 | Task 9 | 退回可选链 + 把该服务写进顶层 `inject`（代价：缺服务会导致整个插件不激活） |
+| A11 | `ctx.inject(deps, cb)` 迟绑定可用（服务就绪后回调、缺服务则静默不注册） | **已验证（源码级，Task 9）**：cordis `ctx.inject(deps, cb)` = `plugin({ inject: deps, apply: cb })`；真例 `dsh-plugin-notify-sound/lib/index.js:22`（顶层 `inject=[]`）+`:47`（`ctx.inject(['settings'], …)`）。本项目 `llm` 照此迟绑定，不写进顶层 `inject`。见 notes §9 | 已完成 | 退回可选链 + 把该服务写进顶层 `inject`（代价：缺服务会导致整个插件不激活） |
 
 ---
 

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { Config, apply, dispatchRelay } from '../lib/index.js'
+import { Config, apply, dispatchRelay, notifyLine, shouldNotify } from '../lib/index.js'
 import { readAudit } from '../lib/store.js'
 
 const GOOD_DOC = `# 头部
@@ -43,6 +43,10 @@ function fakeCtx(overrides = {}) {
     },
     effect: (fn) => fn(),
     on: () => () => {},
+    inject: (deps, cb) => {
+      calls.push(['inject', deps])
+      return () => {}
+    },
     sessionController: {
       create: async (req) => { calls.push(['create', req]); return { sessionId: 'session-new' } },
       prompt: async (req) => { calls.push(['prompt', req]); return { accepted: true } },
@@ -173,4 +177,45 @@ test('回写档头：三个键进「头部」段，且重复执行不堆叠', as
   assert.equal((second.match(/^\s*链:/gm) ?? []).length, 1, '链键被堆叠了')
   assert.equal((second.match(/^\s*接手会话:/gm) ?? []).length, 1, '接手会话键被堆叠了')
   assert.equal((second.match(/^\s*已交接:/gm) ?? []).length, 1, '已交接键被堆叠了')
+})
+
+// ---- 主动提醒（spec §13）----
+
+const ncfg = { enabled: true, cooldownMinutes: 20, dailyCap: 10, growthStepPct: 5, quietFrom: 23, quietTo: 7 }
+
+test('开关关 → 不提醒', () => {
+  assert.equal(shouldNotify({}, { now: new Date('2026-10-06T12:00:00'), pct: 0.9, config: { ...ncfg, enabled: false } }), false)
+})
+
+test('首次越限提醒；未涨 5 个百分点不重复', () => {
+  const now = new Date('2026-10-06T12:00:00')
+  assert.equal(shouldNotify({}, { now, pct: 0.72, config: ncfg }), true)
+  const st = { lastPct: 0.72, lastAt: new Date('2026-10-06T11:00:00').toISOString(), todayCount: 1, today: '2026-10-06' }
+  assert.equal(shouldNotify(st, { now, pct: 0.74, config: ncfg }), false)
+  assert.equal(shouldNotify(st, { now, pct: 0.78, config: ncfg }), true)
+})
+
+test('冷却期内不提醒', () => {
+  const now = new Date('2026-10-06T12:00:00')
+  const st = { lastPct: 0.70, lastAt: new Date('2026-10-06T11:50:00').toISOString(), todayCount: 1, today: '2026-10-06' }
+  assert.equal(shouldNotify(st, { now, pct: 0.90, config: ncfg }), false)
+})
+
+test('日上限封顶', () => {
+  const now = new Date('2026-10-06T12:00:00')
+  const st = { lastPct: 0.70, lastAt: new Date('2026-10-06T10:00:00').toISOString(), todayCount: 10, today: '2026-10-06' }
+  assert.equal(shouldNotify(st, { now, pct: 0.95, config: ncfg }), false)
+})
+
+test('免打扰时段不提醒', () => {
+  const st = {}
+  assert.equal(shouldNotify(st, { now: new Date('2026-10-06T23:30:00'), pct: 0.9, config: ncfg }), false)
+  assert.equal(shouldNotify(st, { now: new Date('2026-10-06T03:00:00'), pct: 0.9, config: ncfg }), false)
+  assert.equal(shouldNotify(st, { now: new Date('2026-10-06T07:00:00'), pct: 0.9, config: ncfg }), true)
+})
+
+test('提醒文案含百分比与工具名', () => {
+  const line = notifyLine(0.72)
+  assert.ok(line.includes('72%'))
+  assert.ok(line.includes('steward_relay'))
 })

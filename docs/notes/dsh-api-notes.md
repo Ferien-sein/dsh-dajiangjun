@@ -114,3 +114,28 @@ ctx.tools.register(defineTool({
 探针最早用 `inject: []` + `apply` 里 `ctx.get(k)` 探测，**结果 `services: []`——6 个键全空**。不是键名错，是**加载顺序**：`inject: []` 意味着插件无依赖，loader 会在所有服务提供者之前启动它，此刻 `ctx.get(k)`（strict 模式要求提供方 fiber 已激活）返回 `undefined`。
 
 同一探针改成 `inject: [...]` 声明后，6 个键全部解析成功（见 §2）。**推论（Task 7–9 必须遵守）**：插件要用的服务，一律写进 `inject` 数组；不要用 `inject: []` + `apply` 里 `ctx.get()` 去取服务——那会静默拿到 `undefined`。
+
+---
+
+## 7. A8：往系统提示追加一行（`system-prompt/assemble` waterfall）
+
+- 服务真名 `systemPrompt`：`dsh-system-prompt/lib/index.js:213` `super(ctx, "systemPrompt")`。
+- **`system-prompt/assemble` 确实是 waterfall**，且第三方插件能挂：`dsh-system-prompt/lib/index.js:355`
+  `const transformed = await this.ctx.waterfall(scopeTarget(this, scope), "system-prompt/assemble", assembly, context, () => Promise.resolve(assembly))`。
+- **监听签名是 `(assembly, context, next)`，不是 `(字符串, next)`**：waterfall 的末参是 `next` 延续，载荷是 `assembly = { sections, contexts, tools, variables }` 对象。要追加一行必须往 `assembly.sections` 里**推一个新 section**（`{ name, text }`），而不是把 `next()` 的结果当字符串拼 `\n`。`renderPrompt` 会按序 join 这些 section（`dsh-system-prompt/lib/index.js` 顶部 `renderPrompt`），空串会被过滤。
+- **`ctx.systemPrompt.append()` 不存在**。`SystemPrompt` 类的方法只有 `section()`（`:240`）、`context()`（`:266`）、`suppressRuntimeContext()`（`:276`）、`tools()`、`variable()`、`assemble()`、`getSectionOrder()`、`getContextOrder()`——**没有 `append`**。若要走"注册式"追加，正确接口是 `ctx.systemPrompt.section({ name, order, text })`，且 `text` 可为函数（每次 assemble 现取）。
+- 本项目选了 **waterfall**（`ctx.on('system-prompt/assemble', …)`），因为它是事件订阅、不要求 `systemPrompt` 服务在 apply 时已激活，也无需把该服务写进顶层 `inject`。全局（未标 scope）插件监听器被 `scopeTarget` 过滤器放行（`dsh-scope/lib/index.js` `scopeTarget`：`tag === undefined → return true`）。
+- 已知边界：若某个 preset 注册了 `complete: true` 的 prompt section，`assemble()` 会用它替换全部 section，waterfall 里追加的 section 会被丢弃（`dsh-system-prompt/lib/index.js:355` 之后的 complete 分支）。这是宿主级覆盖场景，属可接受降级，Task 10 端到端确认。
+
+## 8. 主动提醒的触发点与上下文上限（A9）
+
+- **触发事件不是 `assistant/message` 这个 cordis 事件名**。`assistant/message` 是**持久化会话事件**，由 agent loop 用 `session.append("assistant/message", {…})` 落盘（`dsh-agent-loop/lib/index.js:1144-1150`），不是 `ctx.emit`。想订阅它必须挂 **`session/event`**：`dsh-session/lib/index.js:1466-1473` 在每个落盘事件上 `collectSessionCallbacks(entry.emitCtx, [entry.carrier, "session/event", session, event])`；carrier = `scopeTarget(session, scopeOf(this.ctx))`（`:1736`），全局插件监听器被放行。监听签名是 **`(session, event)`**，`event = { type, seq, time, data }`。
+- `assistant/message` 的 `event.data = { turn, step, message, usage, stream }`（`dsh-agent-loop/lib/index.js:1144-1150`）；provider/model 在 **`event.data.message.source.provider` / `.model`**（`:1139-1140`），不在事件顶层。
+- **`usage` 的字段名是 camelCase `inputTokens` / `outputTokens`**：`dsh-llm/lib/typert.host.js:529` 的 `TokenUsage` 接口 `{ inputTokens, outputTokens, totalTokens?, cacheReadTokens?, cacheWriteTokens?, reasoningTokens? }`；DeepSeek adapter 把 `input_tokens` 映成 `inputTokens`（`dsh-llm-deepseek/lib/index.js:1811`）。
+- **上下文上限字段是嵌套的 `context.contextWindow`，且 `resolveModelInfo` 是 async**：`dsh-llm/lib/index.js:2098` `async resolveModelInfo(provider, model, signal)`，返回对象里 `context === void 0 ? {} : { context: { contextWindow: context.contextWindow } }`（`:2124`）。**不是顶层的 `.contextWindow`**。`resolveModelInfo` 对未注册 provider 会经 `this.registration(provider)` 抛错——必须 catch，取不到就**不提醒**（A9 回退，不许猜分母）。
+
+## 9. A11：`ctx.inject(deps, cb)` 迟绑定可用
+
+- cordis 的 `ctx.inject(deps, callback)` = `this.plugin({ inject: deps, apply: callback })`（`cordis/src/registry.ts` Plugin registry 的 `inject` 方法），语义是"依赖就绪后跑回调、缺依赖则静默不注册"。
+- 真例（本机已发布插件）：`dsh-plugin-notify-sound/lib/index.js:22` 顶层 `export const inject = []`，`:47` `ctx.inject(['settings'], (sctx) => { sctx.settings.register(...) })`，注释明确"settings 就绪后再注册；完全没有 settings 的 profile 静默不注册"。
+- 本项目照此：`llm` **不写进顶层 `inject`**，在 `apply` 里 `ctx.inject(['llm'], (sctx) => …)` 迟绑定（Ruling 8）。
