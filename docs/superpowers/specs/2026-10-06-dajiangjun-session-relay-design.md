@@ -291,27 +291,37 @@ v1 的一切都是"agent 调工具、拿文本结果"。加 `lib/client.js` 要�
 
 ### 10.1 端到端实测（Task 10，2026-10-06）
 
-**结论：headless 不可用；web（steward-dev）路线可无人值守驱动，但真链在投递前一步因一处代码 bug 中断（BLOCKED，待控制方裁定）。**
+**结论：headless 不可用；web（steward-dev）路线可无人值守驱动，真链最终跑通——四条 Expected 全部达成。但这一路抓出 4 处"替身照错误假设写、单测与实现互相印证一起错"的 API 形状 bug，全部已修（见 §10.1.1）。**
 
 **headless 路线（不可用）**：
 - `dsh plugin --profile headless add <项目路径>` 成功，配置树出现 `- id: dajiangjun`。
 - 默认模型路由 `deepseek-official` 报 `MISSING_CREDENTIAL`（本机无 `DEEPSEEK_API_KEY`）；`--patch` 切 `deepseek-account` 后可跑出 LLM 结果。
 - 但插件 `pending (waiting for service: sessionController)`：headless 配置树**没有** `@deepseek-ai/dsh-api-session-controller`（web 客户端，需常驻 HTTP host）。插件顶层 `inject` 硬依赖它 → `steward_relay` 工具未注册。
 
-**web（steward-dev）路线（可驱动，真链中断在投递前）**：
+**web（steward-dev）路线（可驱动，最终跑通）**：
 - `steward-dev`（web 模板建的隔离 profile）**有** `sessionController`。启动输出打印一次性令牌 `dsh web: http://127.0.0.1:19399/?token=…`。
-- 认证可复现：`GET /?token=…` 拿签名 cookie → `POST /api/session/{create,prompt,list,page}` 走 Typert RPC；实测 `create`/`prompt`/`list`/`page` 全部 HTTP 200。
+- 认证可复现：`GET /?token=…` 拿签名 cookie → `POST /api/session/{create,prompt,list,page}` 走 Typert RPC；实测全部 HTTP 200。
 - 插件激活、`steward_relay` 注册成功（`enabled: true` 经 `cordis.patch.yml` 覆盖）。
-- **真链实测**（审计 `~/.dsh/steward/audit/2026-10.jsonl` 原始行）：
-  - 预览 → `result: "preview"`（`dryRun: true`），**无新会话** ✅
-  - 真执行 → `create()` 建出新会话（`newSessionId` 已写），随后在**权限回读断言**一步失败：`result: "failed"`，`error: "Cannot read properties of undefined (reading 'header')"` ❌
-- **根因（代码 bug）**：`lib/index.js` `dispatchRelay` 把 `ctx.sessionController.resolveAgent(sid)` 的返回值当 agent 直接读 `.session`；但该 API 返回 `{ agent }`（或 `{ error }`）包装，`.session` 恒为 `undefined` → `sessionProjections.stateOf(undefined, 'sandboxMode')` 抛错。正确应为 `.agent.session` 并处理 `{ error }` 分支。
+- **真链实测（修复后，四条 Expected 全绿）**：
+  1. 预览 → 审计 `result: "preview"`（`dryRun: true`），**无新会话** ✅
+  2. 真执行 → 审计 `result: "dispatched"`（`dryRun: false`，`newSessionId` 已写） ✅
+  3. 出现标题 `【续】relay-e2e-test4` 的新会话（`session/list` 可见） ✅
+  4. **该新会话自己开工**：`running: true`，随后持续产出 assistant 消息（读档 → 核审计 → 核代码 → 核配置，`session/page` 抓到的 `assistant/message` 序列为证） ✅
+
+### 10.1.1 端到端抓出的 4 处 API 形状 bug（全部已修，均有回归测试）
+
+| # | 位置 | 错误写法 | 真实签名 | 端到端症状 |
+|---|---|---|---|---|
+| 1 | `dispatchRelay` 权限回读 | `resolveAgent(sid).session` | 返回 `{ agent }` 或 `{ error }` 包装 | `reading 'header'` |
+| 2 | `runRelay` doc 闸 | `readFileSync` catch 直接 return 不落审计 | 每道闸须留审计行（§5） | #2 注入零审计行 |
+| 3 | `dispatchRelay` 命名 | `sessionTitle.rename(newId, …)` | `rename(session, title)`，第一参是 session 对象 | `session "undefined" is not live` |
+| 4 | `dispatchRelay` 投递 | `sessionController.prompt(req)` 少传 signal | `prompt(request, signal)`，signal 是 @Remote 取消参数 | `reading 'throwIfAborted'` |
 
 **失败注入**：
-- #2（`docPath` 不存在）✅ 已复现：工具返回 `读不到交接档：…`（`gate: 'doc'` 分支），**零新会话**。**但该拒绝路径不写审计行**（`readFileSync` catch 直接 return，未 `appendAudit`）——与 §5「每道闸留一行审计」不符，第二处实现问题。
-- #1（投递前杀进程）、#3（只读源会话）**未验证**：被上面的 `resolveAgent` bug 挡在投递前，无法复现。
+- #2（`docPath` 不存在）✅ 已复现：工具返回 `读不到交接档：…`（`gate: 'doc'` 分支），**零新会话**；修复后该拒绝路径也落审计行（`reason: 'doc-unreadable'`）。
+- #1（投递前杀进程）、#3（只读源会话）**未验证**：需精确掐 create↔prompt 之间（#1）或指定只读档位起会话（#3），本机无法无人值守复现。
 
-**Step 5（上 desktop profile）未执行**：端到端真链未跑通（投递失败），按额外门不装 desktop。
+**Step 5（上 desktop profile）已执行**：四条 Expected 全过后，先备份 `cordis.patch.yml.bak-dajiangjun`，再 `dsh plugin --profile desktop add`，追加 `- insert: - id: dajiangjun`（`enabled: false, notify: { enabled: false }`，**出厂全关**）。工具出现在下一次 desktop boot 后（插件代码下次 boot 才加载，见 notes §5）。
 
 ---
 

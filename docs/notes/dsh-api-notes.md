@@ -158,4 +158,8 @@ ctx.tools.register(defineTool({
 
 **关键 API 形状（踩坑）**：`ctx.sessionController.resolveAgent(sessionId)` **返回 `{ agent }` 或 `{ error }` 包装**，**不是**裸 agent。源码：`SessionController.resolveAgent`（`dsh-api-session-controller/lib/index.js`）→ `ApiSessionAgentController.resolveAgent` → `resolve()`，`liveAgent()` 返回 `{ agent }`（`… : { agent }`），`resolve` 失败返回 `{ error }`。它**不是** `@Remote` 方法（远程客户端方法清单里没有它），是 host-only 内部方法。
 - 用它的正确姿势：`const { agent } = await ctx.sessionController.resolveAgent(sid)` 且先判 `if ("error" in r) …`；或直接用 `ctx.sessionController.inspect(sid)`（返回 `{ meta, events }`，不激活 agent）。
-- 本插件 `lib/index.js` `dispatchRelay` 误写成 `resolveAgent(sid).session` → `undefined` → `sessionProjections.stateOf(undefined,…)` 抛 `Cannot read properties of undefined (reading 'header')`（Task 10 端到端实跑抓到，待控制方裁定修复）。
+- 本插件 `lib/index.js` `dispatchRelay` 误写成 `resolveAgent(sid).session` → `undefined` → `sessionProjections.stateOf(undefined,…)` 抛 `Cannot read properties of undefined (reading 'header')`（Task 10 端到端实跑抓到，已修）。
+
+**另两处 API 形状（同样被端到端抓到、同样已修）**：
+- `ctx.sessionTitle.rename(session, title)` 第一参是 **session 对象**（`dsh-session-title/lib/index.js` `rename` 里 `this.ctx.sessions.get(session.id)`），**不是 sessionId**。误写成 `rename(newId, title)` → `session.id === undefined` → `session "undefined" is not live in this store`。正确姿势：`rename(dstFound.agent.session, title)`。
+- `ctx.sessionController.prompt(request, signal)` 是 `@Remote` 方法，`signal`（AbortSignal）由 Typert RPC 注入；**宿主内直接调用必须显式传**，否则 `signal.throwIfAborted()` 抛 `reading 'throwIfAborted'`。正确姿势：`prompt(request, new AbortController().signal)`。对比：`sessionController.create(request)` 无 signal、可直接调；`rename` 走的是 `sessionTitle` 服务（见上一条）。
