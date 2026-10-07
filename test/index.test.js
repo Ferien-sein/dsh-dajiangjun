@@ -50,7 +50,11 @@ function fakeCtx(overrides = {}) {
     sessionController: {
       create: async (req) => { calls.push(['create', req]); return { sessionId: 'session-new' } },
       prompt: async (req) => { calls.push(['prompt', req]); return { accepted: true } },
-      resolveAgent: async (id) => { calls.push(['resolveAgent', id]); return { session: { id } } },
+      // ⚠️ 真实返回形状是 **{ agent } 或 { error } 的包装，不是 agent 本身**。
+      // 早期这里写成 `{ session: { id } }`（照控制方的错误假设），于是代码与替身互相印证、一起错：
+      // 53 条单测全绿、5 轮独立审查全过，却测了一个不存在的 API 形状，直到端到端才炸。
+      // 这就是"替身照实现写"的代价——本项目最想避免的"假绿"。
+      resolveAgent: async (id) => { calls.push(['resolveAgent', id]); return { agent: { session: { id } } } },
     },
     sessionTitle: { rename: async (s, t) => { calls.push(['rename', t]); return { title: t, eventSeq: 1 } } },
     sessionProjections: { stateOf: () => 'workspace-write' },
@@ -177,6 +181,24 @@ test('回写档头：三个键进「头部」段，且重复执行不堆叠', as
   assert.equal((second.match(/^\s*链:/gm) ?? []).length, 1, '链键被堆叠了')
   assert.equal((second.match(/^\s*接手会话:/gm) ?? []).length, 1, '接手会话键被堆叠了')
   assert.equal((second.match(/^\s*已交接:/gm) ?? []).length, 1, '已交接键被堆叠了')
+})
+
+test('权限投影读不到（resolveAgent 返回 { error }）→ 拒、退出码 5、不投递', async () => {
+  const { home, docPath } = tempHome()
+  const calls = []
+  const ctx = fakeCtx({
+    sessionController: {
+      create: async () => { calls.push('create'); return { sessionId: 'session-new' } },
+      resolveAgent: async () => { calls.push('resolveAgent'); return { error: { code: 'session/not-found' } } },
+      prompt: async () => { calls.push('prompt'); return { accepted: true } },
+    },
+  })
+  const res = await dispatchRelay(ctx, CFG, callArgs(docPath))
+  assert.equal(res.kind, 'partial')
+  assert.equal(res.exitCode, 5)
+  assert.equal(res.gate, 'permission')
+  assert.equal(calls.includes('prompt'), false, '权限读不到却仍然投递了')
+  assert.equal(readAudit(home, 2, new Date()).some((r) => r.gate === 'permission'), true, '权限闸没留审计行')
 })
 
 // ---- 主动提醒（spec §13）----
