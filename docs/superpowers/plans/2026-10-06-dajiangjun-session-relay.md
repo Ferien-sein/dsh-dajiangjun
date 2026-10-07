@@ -1178,16 +1178,33 @@ function trailingFailures(rows, mainline) {
 }
 
 /**
+ * **前置闸门**：不需要读档、不需要权限投影，也**不允许产生任何副作用**。
+ *
+ * 必须在**任何 I/O 之前**跑（spec §1 G8：关闭时零副作用）。
+ * 端到端实测抓到过这个顺序错误：`runRelay` 先 `readFileSync`，于是总开关关着时
+ * 仍然读了文件、还写了一行 `rejected` 审计，并给用户返回误导性的"读不到交接档"
+ * 而不是"未启用"。见 Ruling 34。
+ *
+ * 这三道闸门**不写审计行**——"每道闸留审计行"（spec §5）从属于"关闭时零副作用"（§1 G8）：
+ * 插件休眠时不落任何痕迹，否则任何人都能靠反复调用把审计流水刷大。
+ */
+export function preflightGates({ config, isSubagent }) {
+  if (config === null || config === undefined) return { ok: false, gate: 'config-unreadable', reason: '配置读不到，按拒处理', code: 5 }
+  if (config.enabled !== true) return { ok: false, gate: 'total-switch', reason: '大管家未启用（enabled 出厂为 false）', code: 5 }
+  if (isSubagent) return { ok: false, gate: 'caller', reason: '子代理不得发起接力', code: 2 }
+  return { ok: true, code: 0 }
+}
+
+/**
  * 闸门判定（spec §5 的 8 道中除单飞锁外的 7 道）。
- * 短路顺序：配置不可读 → 总开关 → 调用者 → 档 → 禁写 → 去重 → 速率 → 失败 → 权限。
+ * 短路顺序：**前置三道**（配置不可读 → 总开关 → 调用者）→ 档 → 禁写 → 去重 → 速率 → 失败 → 权限。
  * （`config-unreadable` 必须最先：配置读不到时根本无法判断 `enabled`。Ruling 20）
  */
 export function evaluateGates(input) {
   const { config, auditRows = [], now = new Date() } = input
 
-  if (config === null || config === undefined) return { ok: false, gate: 'config-unreadable', reason: '配置读不到，按拒处理', code: 5 }
-  if (config.enabled !== true) return { ok: false, gate: 'total-switch', reason: '总开关关闭', code: 5 }
-  if (input.isSubagent) return { ok: false, gate: 'caller', reason: '子代理不得发起接力', code: 2 }
+  const pre = preflightGates({ config, isSubagent: input.isSubagent })
+  if (!pre.ok) return pre
   if (!input.docOk) return { ok: false, gate: 'doc', reason: '交接档结构不合格', code: 5 }
   if (!input.forbiddenOk) return { ok: false, gate: 'forbidden', reason: '交接档含禁写内容', code: 5 }
 
@@ -1373,14 +1390,20 @@ test('dryRun 缺省为 true：零真副作用', async () => {
   assert.equal(rows[0].result, 'preview')
 })
 
-test('总开关关闭时拒且零写操作', async () => {
-  const { docPath } = tempHome()
+test('总开关关闭时拒且**真正的零副作用**（未读档、未留审计）', async () => {
+  const { home } = tempHome()
   const ctx = fakeCtx()
   apply(ctx, Config({ enabled: false }))
-  const res = await ctx.registered.execute({ docPath }, { agent: { id: 'session-src' } })
+  // 传一个**不存在**的路径：若实现先读档，就会返回 gate:'doc'；
+  // 只有"先查开关"才会返回 'total-switch'。这一条把顺序钉死了。
+  const res = await ctx.registered.execute(
+    { docPath: path.join(home, 'nope.md') },
+    { agent: { id: 'session-src' } },
+  )
   assert.equal(res.kind, 'rejected')
-  assert.equal(res.gate, 'total-switch')
+  assert.equal(res.gate, 'total-switch', '读档发生在总开关之前 → 关闭时仍有副作用')
   assert.equal(ctx.calls.some((c) => c[0] === 'create'), false)
+  assert.deepEqual(readAudit(home, 2, new Date()), [], '关闭时不得写审计行（spec §1 G8 零副作用）')
 })
 
 test('新 home 的审计流水为空', () => {
@@ -1403,7 +1426,7 @@ Expected: FAIL — `Cannot find module '../lib/index.js'`
 import { readFileSync } from 'node:fs'
 import z from '@deepseek-ai/schemastery'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { checkForbidden, evaluateGates, makeRelayId, resolveMainline, validateDoc } from './relay.js'
+import { checkForbidden, evaluateGates, makeRelayId, preflightGates, resolveMainline, validateDoc } from './relay.js'
 import { appendAudit, dshHome, readAudit } from './store.js'
 
 export const name = 'dajiangjun'
@@ -1457,6 +1480,16 @@ async function runRelay(ctx, config, args, exec) {
   const sourceSessionId = exec?.agent?.id ?? exec?.agent?.session?.id ?? 'unknown'
   const auditRows = readAudit(home, 2, new Date())
   const dryRun = args.dryRun !== false
+
+  // ⚠️ 前置闸门必须在**读档之前**跑：总开关关着时"零副作用"意味着不读档、不落审计，
+  // 且返回的是"未启用"而不是误导性的"读不到交接档"（Ruling 34，端到端实测抓到）。
+  const pre = preflightGates({ config, isSubagent: isSubagentCaller(exec) })
+  if (!pre.ok) {
+    return {
+      kind: 'rejected', exitCode: pre.code, gate: pre.gate,
+      message: `${pre.reason}。（关闭时零副作用：未读档、未留审计）`,
+    }
+  }
 
   let text
   try {
