@@ -1,0 +1,5 @@
+# 大管家 bundle 层：profile 的 package.json 声明 dsh.bundle.patch 指向本文件。
+# name 是包名（从 profile 的 node_modules 解析），不是相对路径。
+- insert:
+    - id: dajiangjun
+      name: dsh-dajiangjun
