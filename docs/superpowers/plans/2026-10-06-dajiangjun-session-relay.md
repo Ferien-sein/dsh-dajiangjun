@@ -1950,7 +1950,9 @@ Expected: FAIL
 
 ```js
 export function notifyLine(pct) {
-  return `\u26a0 本会话上下文已用 ~${Math.round(pct * 100)}%，接近上限。准备交接：写完交接档后调用 steward_relay。`
+  // Ruling 47：文案已改为「先预览 → 经人确认 → 才传 dryRun:false」（见文件末尾「Ruling 47」一节）。
+  // 下面这行是**改后的出货文本**，不是当时的原始版本。
+  return `\u26a0 本会话上下文已用 ~${Math.round(pct * 100)}%，接近上限。准备交接：先写交接档，然后调用 steward_relay 预览；把预览给人看，确认后才传 dryRun:false。`
 }
 
 function dayKey(date) {
