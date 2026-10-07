@@ -57,10 +57,13 @@ The problems and acceptance criteria defined in that work directly determined wh
 | Implementation | 641 lines (`lib/`) |
 | Tests | 654 lines (`test/`, 64 tests, all green) |
 | Design docs / plan / decision ledger | 2,721 lines (`docs/`) |
+| Build record (SDD) | 21 files / ~240 KB — see [`docs/sdd/`](docs/sdd/2026-10-06-dajiangjun-session-relay/README.md) |
 | AI sessions involved | 1 lead session + 38 subagents (plus 3 side-branch/research top-level sessions, 13 end-to-end test sessions, 2 empty sessions and 1 unrelated session in the same workspace — itemised in §3.3) |
 | Human involvement | 1 initial instruction; a few factual clarifications (e.g. "that interruption was the machine powering off, not the agent's fault") |
 
-The development method is itself part of the methodology: the lead session split the work into 10 task cards; each card was dispatched to an **implementer subagent**, then independently reviewed by a separate **reviewer subagent**; any Important finding triggered a **scoped re-review**, and if needed a **fix round** — up to 5 rounds per card. Dispatch briefs, reports, review diffs and decisions are all recorded under `docs/`.
+The development method is itself part of the methodology: the lead session split the work into 10 task cards; each card was dispatched to an **implementer subagent**, then independently reviewed by a separate **reviewer subagent**; any Important finding triggered a **scoped re-review**, and if needed a **fix round** — up to 5 rounds per card.
+
+**The entire paper trail ships with the repository**: dispatch briefs, implementer reports, and the lead's running log (including 41 rulings and the 10 real defects the process caught) → [`docs/sdd/2026-10-06-dajiangjun-session-relay/`](docs/sdd/2026-10-06-dajiangjun-session-relay/README.md). The 21 raw review diffs are not included (they duplicate git history), but the index page maps every review range to this repository's current commits so you can regenerate any of them with `git diff`.
 
 > Note: the Git commit identity is the repository maintainer's account (the AI committed under it). **Commit identity ≠ content authorship** — the author of the content in all 54 commits is an AI agent.
 
