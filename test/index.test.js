@@ -164,17 +164,17 @@ test('失败注入 #2：docPath 不存在 → 拒、退出码 5、零新会话�
   assert.equal(rows[0].dryRun, false, '缺省 dryRun:true 之外的显式调用应记 dryRun:false')
 })
 
-test('子代理判据：header.parentSession 存在 → 拒（caller，退出码 2）', async () => {
+test('子代理判据：header.origin=subagent → 拒（caller，退出码 2）', async () => {
   const { docPath } = tempHome()
   const ctx = fakeCtx()
   apply(ctx, Config({ enabled: true }))
-  // 必须经由 isSubagentCaller 本身：子会话的判据是 header.parentSession，不是 exec.parent。
+  // 必须经由 isSubagentCaller 本身：子会话的判据是 header.origin === 'subagent'（与宿主判别器逐字一致），不是 exec.parent。
   const res = await ctx.registered.execute(
     { docPath },
-    { agent: { id: 'session-src', session: { header: { parentSession: 'session-parent' } } } },
+    { agent: { id: 'session-src', session: { header: { origin: 'subagent', parentSession: 'session-parent' } } } },
   )
   assert.equal(res.kind, 'rejected')
-  assert.equal(res.gate, 'caller', '子代理（header.parentSession）没被拦 → 白名单形同虚设')
+  assert.equal(res.gate, 'caller', '子代理（origin=subagent）没被拦 → 白名单形同虚设')
   assert.equal(res.exitCode, 2)
 })
 
@@ -185,6 +185,19 @@ test('主会话判据：header 无 parentSession → 不是子代理（走预览
   const res = await ctx.registered.execute(
     { docPath },
     { agent: { id: 'session-src', session: { header: {} } } },
+  )
+  assert.equal(res.kind, 'preview')
+})
+
+test('fork 判据：有 parentSession 无 origin → 放行（走预览）', async () => {
+  const { docPath } = tempHome()
+  const ctx = fakeCtx()
+  apply(ctx, Config({ enabled: true }))
+  // fork 也写 parentSession，但不写 origin:'subagent'（commands.js:254）。它是有权发起接力的合法调用者，
+  // 不得被误判成子代理而拒掉（Ruling 41——「parentSession != null」判据过宽）。
+  const res = await ctx.registered.execute(
+    { docPath },
+    { agent: { id: 'session-src', session: { header: { parentSession: 'session-parent' } } } },
   )
   assert.equal(res.kind, 'preview')
 })
