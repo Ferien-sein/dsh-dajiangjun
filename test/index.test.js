@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { Config, apply, dispatchRelay, notifyLine, shouldNotify } from '../lib/index.js'
+import { Config, apply, dispatchRelay, notifyLine, pressurePct, shouldNotify } from '../lib/index.js'
 import { readAudit } from '../lib/store.js'
 
 const GOOD_DOC = `# 头部
@@ -415,4 +415,10 @@ test('提醒文案含百分比与工具名', () => {
   const line = notifyLine(0.72)
   assert.ok(line.includes('72%'))
   assert.ok(line.includes('steward_relay'))
+})
+
+test('inputTokens 小但 cacheReadTokens 大 → 提醒仍会触发（分子含缓存 token，Ruling 42）', () => {
+  // 旧实现只算 inputTokens：1000/262144 ≈ 0.38% → 不触发；正确口径（含 cacheRead）≈ 77% → 触发
+  const pct = pressurePct({ inputTokens: 1000, cacheReadTokens: 200000 }, 262144)
+  assert.ok(pct >= 0.7, `pct=${pct} 应越过软限（旧实现漏算缓存 token）`)
 })
