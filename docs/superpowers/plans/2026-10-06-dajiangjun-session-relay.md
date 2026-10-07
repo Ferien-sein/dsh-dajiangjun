@@ -2266,3 +2266,31 @@ spec §4 要求段 1 头部须含 `主线:`，第 5 段须有有序列表首项�
 **修法**：`isSubagentCaller` 收紧为 **`exec?.agent?.session?.header?.origin === 'subagent'`** —— 与宿主判别器**逐字一致**。刻意不自己发明 `parentSession != null && origin === 'subagent'` 这种变体：**那正是"同一事实两处口径"，下次宿主改动时会再次错判。**
 
 **补测试**：必须覆盖 **fork 形态**（`parentSession` 存在、`origin` 缺失）→ **放行**；连同已有的「子代理 `origin:'subagent'` → 拒」与「普通会话 → 放行」。
+
+
+---
+
+## 收尾后追加：Ruling 42（**Critical —— 使主动提醒失效**）
+
+> 起因：使用者问"跑足够样本要多少 token / 多少钱"。为算这笔账去读本机真实账本（`~/.dsh/storages/cost-meter/ledger.json`），顺带查了宿主自己怎么算上下文压力，于是查出这处缺陷。
+
+**缺陷**：提醒的判据是 `pct = usage.inputTokens / contextWindow >= softLimitRatio`，但
+
+- `dsh-token-meter/lib/types/usage-projection.js:15` 把 `usage.inputTokens` 明确命名为 **`uncachedInputTokens`**（**未命中缓存**那部分）；
+- 同文件 `:58` 宿主自己的上下文压力 = `inputTokens + cacheReadTokens + cacheWriteTokens`。
+
+**量化**（2026-10-07 本机实测）：prompt 侧总量 `input 4,877,532 + cacheRead 337,640,832 = 3.425 亿`，其中 `inputTokens` 仅占 **1.42%**。要让 `pct` 达 0.7，需宿主真实压力为窗口的 **49 倍** —— 不可能。**提醒几乎永不触发；观测期样本恒为 0，而"0 误报"会是一份假绿**（误报率恰是本项目第一 KPI）。
+
+**这条此前是 deferred minor #14（"pct 只按 `inputTokens` 计…属语义可议点"）—— 控制方当时判轻了。** 更正前判：它不是语义可议，是让整条功能不成立。
+
+**修法（一行，且是"对齐权威源"）**：
+
+```js
+const pct = (usage.inputTokens + (usage.cacheReadTokens ?? 0) + (usage.cacheWriteTokens ?? 0)) / limit
+```
+
+**为什么不直接复用宿主的 `contextPressure` 投射**（`ctx.sessionProjections.stateOf(session, 'contextPressure')`，它已算好 `pressureTokens`/`contextWindow`）：那会引入"**依赖另一个插件在场、不在场则静默降级**"的新失效面，而本项目最反对的正是静默降级。取同一公式、零依赖。
+
+**注意**：与 Ruling 41 是同一条教训的第三次出现 —— **不要自己发明口径，抄权威源**（本次是抄公式，并在注释里写明 `file:line` 出处，供日后 DSH 改动时核对）。
+
+**测试要求**：需有一条断言"**`inputTokens` 很小但 `cacheReadTokens` 很大时，提醒仍会触发**"——这正是旧实现会挂掉的地方。

@@ -395,7 +395,19 @@ v1 砍掉了原设计的「软限阈值」闸门（§5 闸门 1），代价是**
 
 ### 13.5 阈值来源
 
-软限比例 **顶层** `softLimitRatio`（默认 0.7），分母取自当前模型的上下文上限（`resolveModelInfo()` 是 **async**，上限在嵌套字段 `context.contextWindow`）。
+软限比例 **顶层** `softLimitRatio`（默认 0.7）。
+
+**分子 = prompt 侧全部 token**，与宿主自己的上下文压力**同口径**：
+
+```
+pct = (usage.inputTokens + (usage.cacheReadTokens ?? 0) + (usage.cacheWriteTokens ?? 0)) / contextWindow
+```
+
+**权威源**：`dsh-token-meter/lib/types/usage-projection.js:58` 的 `pressureFrom`（宿主自己的 `contextPressure` 投射用的就是它）；同文件 `:15` 把 `usage.inputTokens` 明确命名为 `uncachedInputTokens`。
+
+> **单用 `inputTokens` 会漏掉绝大部分 prompt token，使提醒几乎永不触发** —— 2026-10-07 本机实测：`input 4.88M` vs `cacheRead 337.6M`，前者仅占 **1.42%**。要让 `pct` 达 0.7 需宿主真实压力为窗口的 **49 倍**，数学上不可能。见 Ruling 42。
+
+**分母** 取自当前模型的上下文上限（`resolveModelInfo()` 是 **async**，上限在嵌套字段 `context.contextWindow`）；`deepseek-flash` 与 `deepseek-v4-pro` 均为 **262,144**。
 
 **回退路径**：取不到模型上限 → **不提醒**（不许猜一个分母）。见 §10 的 A9。
 
