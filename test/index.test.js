@@ -118,14 +118,20 @@ test('dryRun 缺省为 true：零真副作用', async () => {
   assert.equal(rows[0].result, 'preview')
 })
 
-test('总开关关闭时拒且零写操作', async () => {
-  const { docPath } = tempHome()
+test('总开关关闭时拒且**真正的零副作用**（未读档、未留审计）', async () => {
+  const { home } = tempHome()
   const ctx = fakeCtx()
   apply(ctx, Config({ enabled: false }))
-  const res = await ctx.registered.execute({ docPath }, { agent: { id: 'session-src' } })
+  // 传一个**不存在**的路径：若实现先读档，就会返回 gate:'doc'；
+  // 只有"先查开关"才会返回 'total-switch'。这一条把顺序钉死了。
+  const res = await ctx.registered.execute(
+    { docPath: path.join(home, 'nope.md') },
+    { agent: { id: 'session-src' } },
+  )
   assert.equal(res.kind, 'rejected')
-  assert.equal(res.gate, 'total-switch')
+  assert.equal(res.gate, 'total-switch', '读档发生在总开关之前 → 关闭时仍有副作用')
   assert.equal(ctx.calls.some((c) => c[0] === 'create'), false)
+  assert.deepEqual(readAudit(home, 2, new Date()), [], '关闭时不得写审计行（spec §1 G8 零副作用）')
 })
 
 test('新 home 的审计流水为空', () => {
