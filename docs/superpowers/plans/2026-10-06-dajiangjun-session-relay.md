@@ -1722,14 +1722,30 @@ export async function dispatchRelay(ctx, config, { mainline, relayId, docPath, s
 
 - [ ] **Step 4: 把 `dispatchRelay` 接进 `runRelay`**
 
-把 Task 7 里 `runRelay` 的尾段替换为：
+把 Task 7 里 `runRelay` 的尾段替换为下面**三段**（不是两行——预览的审计行必须留在预览分支**内**）：
 
 ```js
-  if (dryRun) return { ...base, kind: 'preview', exitCode: 0, message: preview }
+  if (dryRun) {
+    appendAudit(home, {
+      ts: new Date().toISOString(),
+      actor: 'agent',
+      actionId: 'relay',
+      dryRun: true,
+      result: 'preview',
+      mainline,
+      sourceSessionId,
+      relayId,
+    })
+    return { ...base, kind: 'preview', exitCode: 0, message: preview }
+  }
   return dispatchRelay(ctx, config, { mainline, relayId, docPath: args.docPath, sourceSessionId, text })
 ```
 
-（`preview` 变量定义保持不变；先 `if (dryRun)` 再 dispatch——**预览路径不得触达任何写操作**。）
+**为什么不能照字面只写两行**（Ruling 22）：Task 7 的原代码里，那条预览行的 `appendAudit` 就落在这段尾段中。
+- 把它一并删掉 → 预览不再留审计行，**Task 7 的 `rows.length === 1` 断言当场挂**；
+- 把它留在 `if (dryRun)` 之外 → **真执行路径也会写一条幽灵 `preview` 行**，污染审计流水与闸门计数。
+
+所以必须是这样三段：预览分支内写预览行并返回；否则才走 dispatch。`preview` 变量本身的构造保持不变，**预览路径不得触达任何真实写操作**。
 
 - [ ] **Step 5: 跑测试确认通过**
 
