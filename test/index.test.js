@@ -165,7 +165,12 @@ test('回写档头：三个键进「头部」段，且重复执行不堆叠', as
   assert.ok(/^\s*链:\s*relay-session-src-/m.test(first))
   assert.ok(/^\s*接手会话:\s*session-new\s*$/m.test(first))
 
-  await dispatchRelay(ctx, CFG, callArgs(docPath, 1))
+  // 第二次必须喂**改后**的档文本（从磁盘读回来），否则 rewriteHeader 的去重分支根本没被走到：
+  // 喂原始 GOOD_DOC 的话结果是从原文本重新生成，永远只有一条链键 → 断言恒真、删掉过滤也能过。
+  // 生产路径 runRelay 正是从磁盘读档，所以第二次读到的文本**含**上次写的键——那条过滤真的在承重。
+  await dispatchRelay(ctx, CFG, { ...callArgs(docPath, 1), text: readFileSync(docPath, 'utf8') })
   const second = readFileSync(docPath, 'utf8')
   assert.equal((second.match(/^\s*链:/gm) ?? []).length, 1, '链键被堆叠了')
+  assert.equal((second.match(/^\s*接手会话:/gm) ?? []).length, 1, '接手会话键被堆叠了')
+  assert.equal((second.match(/^\s*已交接:/gm) ?? []).length, 1, '已交接键被堆叠了')
 })
