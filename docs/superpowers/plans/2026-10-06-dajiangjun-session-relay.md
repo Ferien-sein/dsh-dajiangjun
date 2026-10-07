@@ -2251,3 +2251,18 @@ spec §4 要求段 1 头部须含 `主线:`，第 5 段须有有序列表首项�
 ### 控制方流程疏漏（记录备查）
 
 - `docs/三形状对照.md`（141 行，一份**下一期决策稿**）是**接力派发出去的新会话在端到端过程中写的**，而控制方用 `git add -A` 把它卷进了 `16e1a3b`。**教训：`git add -A` 会提交不是我写的文件。** 该文件**保留**——它是"接力真的产出有用东西"的实证，但需在分支总结里点名它的来历。
+
+
+### Ruling 41（**复审新发现**）：R36 的判据过宽，会把 `fork` 会话误判成子代理
+
+`header.parentSession != null` 太宽。控制方独立核实：
+
+- **子代理**同时写两样：`dsh-subagent/lib/types/child-agent.js:117` `parentSession: parentHeader.id` + `:121` `origin: 'subagent'`
+- **`fork`** 只写 `parentSession`：`dsh-api-session-controller/lib/types/commands.js:254` `parentSession: source.header.id`，附近**没有** `origin`
+- 宿主自己的判别器用的是 **`origin === 'subagent'`**（`dsh-api-session-controller/lib/index.js:126-132`；`commands.js:522` 亦以 `source.origin !== 'subagent'` 判别）
+
+**后果**：fork 出来的会话是**合法调用者**，却会被当成子代理拒掉（功能回归，非安全危害）。
+
+**修法**：`isSubagentCaller` 收紧为 **`exec?.agent?.session?.header?.origin === 'subagent'`** —— 与宿主判别器**逐字一致**。刻意不自己发明 `parentSession != null && origin === 'subagent'` 这种变体：**那正是"同一事实两处口径"，下次宿主改动时会再次错判。**
+
+**补测试**：必须覆盖 **fork 形态**（`parentSession` 存在、`origin` 缺失）→ **放行**；连同已有的「子代理 `origin:'subagent'` → 拒」与「普通会话 → 放行」。
