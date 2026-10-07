@@ -1179,7 +1179,8 @@ function trailingFailures(rows, mainline) {
 
 /**
  * 闸门判定（spec §5 的 8 道中除单飞锁外的 7 道）。
- * 短路顺序：总开关 → 调用者 → 配置 → 档 → 禁写 → 去重 → 速率 → 失败 → 权限。
+ * 短路顺序：配置不可读 → 总开关 → 调用者 → 档 → 禁写 → 去重 → 速率 → 失败 → 权限。
+ * （`config-unreadable` 必须最先：配置读不到时根本无法判断 `enabled`。Ruling 20）
  */
 export function evaluateGates(input) {
   const { config, auditRows = [], now = new Date() } = input
