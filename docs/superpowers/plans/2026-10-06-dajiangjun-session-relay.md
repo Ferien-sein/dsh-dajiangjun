@@ -2213,3 +2213,41 @@ dsh plugin --profile desktop add '<repo>'
 上 desktop 后 **≥3 个自然日**：只开 `notify.enabled`，**不开** `enabled`（即只提醒、不真交接）。第一 KPI = 误报率（标记误报数 / 总提醒数），逐日记。
 
 放行门槛（spec 引文档 07）：误报率 <5% **且**累计样本 ≥25 条才允许打开 `enabled`；样本不足不得放行。达标后放行当天只做"改 `cordis.patch.yml` 里的开关 + 留痕"，不改代码。
+
+
+---
+
+## 终审修复（全分支审查 Ruling 36–39）
+
+> 本节的发现来自**最终整分支审查**（全分支 diff `85031e8..6a53c9b`，37 commit）。上面各任务的代码块是**当时**的参考实现，未逐条回写；以本节为准。
+
+### Ruling 36（**阻断项**）：`isSubagentCaller` 用 `exec.parent` 判子代理是错的
+
+`exec.parent` **只在 PTC（`run_code` / `workflow`）嵌套派发时**被赋值（`dsh-tools/lib/index.js:1306`、`dsh-tools/lib/types/ptc.js:439`，均为 `parent: exec.token`）；而主会话与子代理的 agent-loop 工具调用**从不设它**（`dsh-agent-loop` 内 `parent:` 零命中）。
+
+后果两头都错：① **子代理不会被拦**，spec §8.3 的调用者白名单形同虚设；② 主会话在 `run_code`/`workflow` 里调 `steward_relay` 会被**误判成子代理而拒掉**。
+
+**这是与已修 4 处同款的第 5 个假绿**：唯一那条「子代理 → 拒」的测试是**直接喂 `isSubagent: true`**，绕过了真正要验的 `isSubagentCaller`。
+
+**修法**：正确判据是 **`exec.agent.session.header.parentSession`**（`dsh-subagent` 对子会话写该字段；`CreateAgentOptions.meta.parentSession`）。并补一条**经由 `isSubagentCaller` 本身**的测试（构造 `exec.agent.session.header.parentSession` 存在 / 不存在两种），而不是喂布尔值。
+
+### Ruling 37（Important）：`validateDoc` 对「头部含 `主线:`」不校验 + `resolveMainline` fail-open
+
+spec §4 要求段 1 头部须含 `主线:`，第 5 段须有有序列表首项，主线名取不到则**拒绝接力**。现实现：`validateDoc` 不检查头部 `主线:`；`resolveMainline` 取不到时返回**空串**而非 `null`，`runRelay` 又用 `?? args.mainline ?? ''` 把它吞成空主线 → **fail-open**。
+
+**修法**：`validateDoc` 增加「头部须含 `主线:`」校验；`resolveMainline` 取不到返回 `null`；`runRelay` 对空主线**拒绝**（`gate: 'doc'`），不得回落到空串。
+
+### Ruling 38（Important）：`create({})` 未传 cwd（注释不实）+ 权限降级/退出码路径零测试
+
+- `create({})` 没有传 `cwd`，而代码注释写「cwd 同源会话」——**不实**。真实的 `defaultCwd` 是 `process.cwd()`。要么显式传源会话的 cwd，要么把注释改成事实（选定并写明）。
+- 权限**降级**路径、退出码 3、退出码 1 三条路径**零测试**：因为 `fakeCtx.stateOf` 是常量，永远返回同一个档位，降级永不触发。补 `stateOf` 可变的替身 + 三条断言。
+
+### Ruling 39（Minor 但终审判定必须修）：死导出与文档/注释失实
+
+- **删除 `dedupeKey`**（定义、plan Interfaces 声明、`test/relay.test.js` 的未使用 import 一并清掉）。它无任何消费者——去重闸直接比对 `sourceSessionId`。
+- `README.md` 写「53 个测试」，实测 **55**。
+- `lib/index.js:92,113` 有过时注释。
+
+### 控制方流程疏漏（记录备查）
+
+- `docs/三形状对照.md`（141 行，一份**下一期决策稿**）是**接力派发出去的新会话在端到端过程中写的**，而控制方用 `git add -A` 把它卷进了 `16e1a3b`。**教训：`git add -A` 会提交不是我写的文件。** 该文件**保留**——它是"接力真的产出有用东西"的实证，但需在分支总结里点名它的来历。
