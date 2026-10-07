@@ -49,14 +49,18 @@ function fakeCtx(overrides = {}) {
     },
     sessionController: {
       create: async (req) => { calls.push(['create', req]); return { sessionId: 'session-new' } },
-      prompt: async (req) => { calls.push(['prompt', req]); return { accepted: true } },
+      // ⚠️ 真实签名是 prompt(request, signal)，signal 是 @Remote 取消参数、直接调用时必须显式传。
+      // 端到端第三个被抓的 bug：实现写成 prompt(request) 少传 signal → signal.throwIfAborted() 抛 undefined。
+      prompt: async (req, signal) => { if (!signal?.throwIfAborted) throw new Error('prompt 需要 signal（真实签名 prompt(request, signal)）'); calls.push(['prompt', req]); return { accepted: true } },
       // ⚠️ 真实返回形状是 **{ agent } 或 { error } 的包装，不是 agent 本身**。
       // 早期这里写成 `{ session: { id } }`（照控制方的错误假设），于是代码与替身互相印证、一起错：
       // 53 条单测全绿、5 轮独立审查全过，却测了一个不存在的 API 形状，直到端到端才炸。
       // 这就是"替身照实现写"的代价——本项目最想避免的"假绿"。
       resolveAgent: async (id) => { calls.push(['resolveAgent', id]); return { agent: { session: { id } } } },
     },
-    sessionTitle: { rename: async (s, t) => { calls.push(['rename', t]); return { title: t, eventSeq: 1 } } },
+    // ⚠️ 真实签名是 rename(session, title)，第一参是 **session 对象**，不是 sessionId。
+    // 端到端第二个被抓的 bug：实现写成 rename(newId, title)，newId 是字符串 → session.id 为 undefined。
+    sessionTitle: { rename: async (session, title) => { if (!session?.id) throw new Error('rename 需要 session 对象'); calls.push(['rename', session.id, title]); return { title, eventSeq: 1 } } },
     sessionProjections: { stateOf: () => 'workspace-write' },
     ...overrides,
   }
@@ -127,6 +131,31 @@ test('总开关关闭时拒且零写操作', async () => {
 test('新 home 的审计流水为空', () => {
   const { home } = tempHome()
   assert.deepEqual(readAudit(home, 2, new Date()), [])
+})
+
+test('失败注入 #2：docPath 不存在 → 拒、退出码 5、零新会话、且必须留审计行', async () => {
+  const { home } = tempHome()
+  const ctx = fakeCtx()
+  apply(ctx, Config({ enabled: true }))
+  const missing = path.join(home, '查无此档.md')
+
+  // dryRun:false 才是"真执行"路径——注入 #2 要验的正是这条路上读不到档会怎样
+  const res = await ctx.registered.execute({ docPath: missing, dryRun: false }, { agent: { id: 'session-src' } })
+
+  assert.equal(res.kind, 'rejected')
+  assert.equal(res.exitCode, 5)
+  assert.equal(res.gate, 'doc')
+  assert.equal(ctx.calls.some((c) => c[0] === 'create'), false, '读不到档却建了会话')
+
+  // 「读不到档」是闸门拒绝，不是无事发生——spec §5 要求每道闸都留一行审计（带原因）。
+  // 这里以前 catch 后直接 return，端到端实测才发现这条拒绝路径**不写审计**，
+  // 与 §5 不符。补这条断言，防它再退化。
+  const rows = readAudit(home, 2, new Date())
+  assert.equal(rows.length, 1, '读不到档的拒绝路径没留审计行')
+  assert.equal(rows[0].result, 'rejected')
+  assert.equal(rows[0].gate, 'doc')
+  assert.equal(rows[0].reason, 'doc-unreadable')
+  assert.equal(rows[0].dryRun, false, '缺省 dryRun:true 之外的显式调用应记 dryRun:false')
 })
 
 // ---- 真执行路径（dispatchRelay）----
