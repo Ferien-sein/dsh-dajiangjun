@@ -148,18 +148,37 @@ ctx.tools.register(defineTool({
 - 后果：装进 headless 后宿主只打一行 `dajiangjun (dsh-dajiangjun): pending (waiting for service: sessionController)`，插件**静默停在 pending**、工具不出现、不报错。已写入 README「依赖与适用范围」节。
 - 推论：**端到端验收只能在 web / desktop 宿主做**（或给 headless 补一个真实 session controller + 常驻 runner，属另起方案）。
 
-## 11. web 宿主 HTTP 驱动 + `resolveAgent` 返回形状（Task 10 实测）
+## 11. web 宿主 HTTP 驱动 + 谁真正驱动 agent loop（证据审计修订）
 
-**无人值守驱动 web 宿主（steward-dev）**：
+**结论先行：`session/prompt` 就会驱动 loop，`session/control` 不是驱动通道。**（此前 Task 9 Fix Report 3 的"prompt 只排队、control 流才驱动"是误诊，见下。）
+
+### 让一个会话真正跑起来的最小通道（已验证）
+- 只需 `session/create` + `session/prompt` 两条 RPC；mode 用 `queue` 或 `steer` 都行。**不需要**打开 `session/control` 流。
+- 调用链（源码级）：`session/prompt`（`dsh-api-session-controller/lib/index.js:850-899`，mode≠steer 时 `:883` `agent.followup(message)`）→ `followup`=`send(input,"next-turn",true)`（`dsh-agent-loop/lib/index.js:806-808`）→ `send` 里 `if (wakeup) this.wakeDriver(...)`（`:800-805`）→ `wakeDriver` 置 `running` 并 `kick()`（`:854-869`）→ `kick`→`turn`（`:887-901`,`:936-1040`）→ `step` 里 `llm.stream()`（`:1072`）+ `executeToolCalls()`（`:1154`）。loop 由 agent 自身 `wakeDriver` 驱动，与外部订阅无关。
+- 新会话"自己开工"= 已验证：解压会话日志 `~/.dsh/sessions/<cwd-encoded>/<sessionId>/session.v4.jsonl.zstd`，E2E 新会话（如 `session-xxxxxxxx…`、`session-xxxxxxxx…`、`session-xxxxxxxx…`）里有完整 `turn/start → step/start → request/header → assistant/message → tool/call → … → turn/end`（5–24 个 step、8–39 个 tool/call），全部由 `create`+`prompt` 驱动，无 control 流。
+
+### `session/control` 是什么、谁开（已验证）
+- `session/control` 是 `@Remote({mode:"stream"})`（`dsh-api-session-controller/lib/index.js:2599`）→ `SessionControlController.control`（`:1156-1170`），只**广播** projection 基线 + 增量帧，无任何 wake/driver 逻辑。
+- 由**客户端**打开（`dsh-api-session-controller/lib/client.js:386` `open: signal => remote.session.control(signal)`），是 web UI 的实时状态通道；headless 没有 gateway/`sessionController`，不碰它，而是直接 `agent.followup()`（`dsh-headless/lib/index.js:329`）。
+- driver 启动时机：**建会话不启动、attach control 流不启动、只在第一次 prompt（followup/steer 的 wakeup=true）启动**。`AgentLoop.createAgent→setupAndPublish→initializeAgent` 用 `runMaintenance` 走完 setup 后回到 `idle`（`dsh-agent-loop/lib/index.js:1900-1914`、`:822-845`），不跑 loop。（注意 `inject` 是 `send(...,false)` 不唤醒——所以插件投递用 `queue` 而非 inject。）
+
+### 「accepted 但没跑」是误诊（证据审计修订）
+- 之前据此判定"prompt 只排队"的**判据本身是错的**：只看了成本账本 `~/.dsh/storages/cost-meter/ledger.json` 里没有该会话记录，就下结论"没跑"。
+- 但 `ledger.json` 由**桌面成本计费插件**写；steward-dev（bundle=`dsh-base`+`dsh-web-app`）**没有该插件**，故隔离 web profile 的 LLM 调用不进账本。判据应是**会话日志**（上面的 `.zstd` 文件），不是账本。
+- 实测解压：Task 9 那条 `session-xxxxxxxx…` 日志里其实有 `turn/start`、`step/start`、`request/header`(deepseek-account/deepseek-flash)、`assistant/message`、`tool/call`(ask_user_question)——**loop 跑了**，只是账本没记。E2E 源会话（`session-xxxxxxxx…`/`session-xxxxxxxx…`/`session-xxxxxxxx…`）日志里有 `tool/call: steward_relay`，佐证"源会话确实跑了 agent loop 并调了工具"。
+- 警示：**别用成本账本判断"loop 是否跑"**；在无计费插件的 profile 里它恒空，会误判成"accepted but never runs"。
+
+### 无人值守 HTTP 驱动（已验证）
 - 启动输出打印一次性令牌：`dsh web: http://127.0.0.1:<port>/?token=<一次性令牌>`。
 - 认证：`GET /?token=…`（303）返回 `set-cookie: dsh-auth-…`（签名 cookie，绑 host:port）→ 后续请求带该 cookie。
 - RPC：`POST /api/session/<method>`，请求体 `{"type":"client-request","rpcId":"<uuid>","method":"session/<method>","payload":{"args":{…}}}`；响应 `{"type":"server-response","rpcId","result":{"ok":true,"value":…}}`。端点 = `namespace/method`（`session/create`、`session/prompt`、`session/list`、`session/page`…）。
-- `session/create` 参数 `{ workspaceId?, cwd?, sessionId?, agentPreset? }` → `{ sessionId }`；`session/prompt` 参数 `{ requestId, sessionId, mode:'queue'|'steer', content:[{type:'text',text}] }` → `{ accepted:true }`；`session/list` 返回 `items[]`（含 `running`/`title`/`projections.values.turnOutline`）。
+- `session/create` 参数 `{ workspaceId?, cwd?, sessionId?, agentPreset? }` → `{ sessionId }`；`session/prompt` 参数 `{ requestId, sessionId, mode:'queue'|'steer', content:[{type:'text',text}] }` → `{ accepted:true }`；`session/list` 返回 `items[]`（含 `running`/`title`）；`session/page` 读历史（观察用，非驱动用）。
 
-**关键 API 形状（踩坑）**：`ctx.sessionController.resolveAgent(sessionId)` **返回 `{ agent }` 或 `{ error }` 包装**，**不是**裸 agent。源码：`SessionController.resolveAgent`（`dsh-api-session-controller/lib/index.js`）→ `ApiSessionAgentController.resolveAgent` → `resolve()`，`liveAgent()` 返回 `{ agent }`（`… : { agent }`），`resolve` 失败返回 `{ error }`。它**不是** `@Remote` 方法（远程客户端方法清单里没有它），是 host-only 内部方法。
-- 用它的正确姿势：`const { agent } = await ctx.sessionController.resolveAgent(sid)` 且先判 `if ("error" in r) …`；或直接用 `ctx.sessionController.inspect(sid)`（返回 `{ meta, events }`，不激活 agent）。
-- 本插件 `lib/index.js` `dispatchRelay` 误写成 `resolveAgent(sid).session` → `undefined` → `sessionProjections.stateOf(undefined,…)` 抛 `Cannot read properties of undefined (reading 'header')`（Task 10 端到端实跑抓到，已修）。
+### 关键 API 形状（踩坑，已验证）
+- `ctx.sessionController.resolveAgent(sessionId)` **返回 `{ agent }` 或 `{ error }` 包装**，**不是**裸 agent。源码：`SessionController.resolveAgent`（`dsh-api-session-controller/lib/index.js`）→ `ApiSessionAgentController.resolveAgent` → `resolve()`，`liveAgent()` 返回 `{ agent }`，失败返回 `{ error }`。它**不是** `@Remote` 方法，是 host-only 内部方法。正确姿势：`const { agent } = await resolveAgent(sid)` 且先判 `if ("error" in r) …`；或改用 `inspect(sid)`（返回 `{ meta, events }`，不激活 agent）。
+- `ctx.sessionTitle.rename(session, title)` 第一参是 **session 对象**（`dsh-session-title/lib/index.js` `rename` 里 `this.ctx.sessions.get(session.id)`），**不是 sessionId**。正确姿势：`rename(dstFound.agent.session, title)`。
+- `ctx.sessionController.prompt(request, signal)` 是 `@Remote` 方法，`signal`（AbortSignal）由 Typert RPC 注入；**宿主内直接调用必须显式传**，否则 `signal.throwIfAborted()` 抛 `reading 'throwIfAborted'`。正确姿势：`prompt(request, new AbortController().signal)`。对比：`sessionController.create(request)` 无 signal、可直接调。
 
-**另两处 API 形状（同样被端到端抓到、同样已修）**：
-- `ctx.sessionTitle.rename(session, title)` 第一参是 **session 对象**（`dsh-session-title/lib/index.js` `rename` 里 `this.ctx.sessions.get(session.id)`），**不是 sessionId**。误写成 `rename(newId, title)` → `session.id === undefined` → `session "undefined" is not live in this store`。正确姿势：`rename(dstFound.agent.session, title)`。
-- `ctx.sessionController.prompt(request, signal)` 是 `@Remote` 方法，`signal`（AbortSignal）由 Typert RPC 注入；**宿主内直接调用必须显式传**，否则 `signal.throwIfAborted()` 抛 `reading 'throwIfAborted'`。正确姿势：`prompt(request, new AbortController().signal)`。对比：`sessionController.create(request)` 无 signal、可直接调；`rename` 走的是 `sessionTitle` 服务（见上一条）。
+### 未验证
+- 成本账本为何不记 steward-dev 的 LLM 调用，仅从 profile bundle 差异**推断**（桌面有计费插件、steward-dev 无），未逐包定位计费插件的注册来源；若需坐实，需 grep 桌面 bundle 里写 `storages/cost-meter` 的包。
+- `session/page` 是否只读历史、能否推动 `promote`（resume 冷会话）只在源码层确认（`dsh-api-session-controller/lib/index.js:1445-1529` 的 `follow` 有 `promote` 副作用），未在活宿主复验。
