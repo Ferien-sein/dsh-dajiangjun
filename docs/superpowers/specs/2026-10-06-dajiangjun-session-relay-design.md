@@ -407,7 +407,9 @@ pct = (usage.inputTokens + (usage.cacheReadTokens ?? 0) + (usage.cacheWriteToken
 
 > **单用 `inputTokens` 会漏掉绝大部分 prompt token，使提醒几乎永不触发** —— 2026-10-07 本机实测：`input 4.88M` vs `cacheRead 337.6M`，前者仅占 **1.42%**。要让 `pct` 达 0.7 需宿主真实压力为窗口的 **49 倍**，数学上不可能。见 Ruling 42。
 
-**分母** 取自当前模型的上下文上限（`resolveModelInfo()` 是 **async**，上限在嵌套字段 `context.contextWindow`）；`deepseek-flash` 与 `deepseek-v4-pro` 均为 **262,144**。
+**分母** 取自当前模型的上下文上限（`resolveModelInfo()` 是 **async**，上限在嵌套字段 `context.contextWindow`）。
+
+**取值以运行时上报为准，不要照抄模型目录**：`dsh-llm/-deepseek` 的 `DEFAULT_CONTEXT_WINDOW = 262,144` 只是目录**默认常量**（该目录注释即写明 "deployments may replace the catalog"），而本机 `deepseek-flash` 运行时上报的是 **1,000,000**（2026-10-07 实测：`request/context` 事件 + 以 `pct=0.100253` 反推 ≈100,253 token，与 1M 吻合）。**写死常量会算错阈值 4 倍。**
 
 **回退路径**：取不到模型上限 → **不提醒**（不许猜一个分母）。见 §10 的 A9。
 
