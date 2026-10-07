@@ -411,10 +411,12 @@ test('★ 免打扰期内不许每条消息都写一行（抑制本身不得刷�
   assert.equal(shouldNotify(rows, { now: after, pct: 0.92, sessionId: 's1', config: ncfg }).reason, 'quiet')
 })
 
-test('提醒文案含百分比与工具名', () => {
+test('提醒文案含百分比、工具名、预览与确认（Ruling 47）', () => {
   const line = notifyLine(0.72)
   assert.ok(line.includes('72%'))
   assert.ok(line.includes('steward_relay'))
+  assert.ok(line.includes('预览'), '提醒必须显式要求先预览（别把 dryRun 默认值当护栏）')
+  assert.ok(line.includes('确认'), '提醒必须显式要求经人确认后才真执行')
 })
 
 test('inputTokens 小但 cacheReadTokens 大 → 提醒仍会触发（分子含缓存 token，Ruling 42）', () => {
