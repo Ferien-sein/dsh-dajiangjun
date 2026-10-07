@@ -277,17 +277,27 @@ v1 的一切都是"agent 调工具、拿文本结果"。加 `lib/client.js` 要�
 
 | # | 假设 | 验证方式 | 时机 | 失败退路 |
 |---|---|---|---|---|
-| A1 | 存在可用的"归档/处置空会话"API，供权限断言失败时使用 | 查 `archived-session-gate` 与 `sessionController` 方法清单 | 实现前 | 不建会话前先断言源会话档位；若预判会降级则**根本不建**，代价是漏掉"配置说 A 实际发 B"这一种情形 |
-| A2 | `agents.ensureSession()` 会连带挂上活代理（spike 残留风险） | 隔离 profile 实跑 | 实现中 | `prompt` 前显式确认会话可解析出 agent；不行则改用 `ctx.agents.create()` 低层 API |
+| A1 | 存在可用的"归档/处置空会话"API，供权限断言失败时使用 | 查 `archived-session-gate` 与 `sessionController` 方法清单；**未验证**（端到端，见 §10.1） | 实现前 | 不建会话前先断言源会话档位；若预判会降级则**根本不建**，代价是漏掉"配置说 A 实际发 B"这一种情形 |
+| A2 | `agents.ensureSession()` 会连带挂上活代理（spike 残留风险） | 隔离 profile 实跑（**未验证**，见 §10.1） | 实现中 | `prompt` 前显式确认会话可解析出 agent；不行则改用 `ctx.agents.create()` 低层 API |
 | A3 | 最小插件能装进隔离 profile 并拉起 | **已验证**（2026-10-06）：`dsh-hello` 装进 `steward-dev`，`dsh plugin list` 可见、`--dump-config` 出 `- id: hello`、boot 正常。新增插件：配置树立即生效，插件代码下次 boot 才加载（详见 `docs/notes/dsh-api-notes.md` §5） | 已完成 | 退回外部脚本 + HTTP（但需 GUI 令牌，成本高） |
-| A4 | 投递后新会话自动开工 | **已验证（源码级）**，见决策稿 spike 结果；实跑复核 | 实现中 | 退回"建好会话 + 通知所有者点一下" |
-| A5 | 交接档路径在新会话沙箱内可读 | 实跑 | 实现中 | 改存工作区内 |
-| A6 | `sessionTitle.rename()` 在新会话上生效且不被自动刷新覆盖 | 实跑 | 实现中 | 不改标题（标题只是给人看的路标，不影响链） |
+| A4 | 投递后新会话自动开工 | **已验证（源码级）**，见决策稿 spike 结果；实跑复核（**未验证**，见 §10.1） | 实现中 | 退回"建好会话 + 通知所有者点一下" |
+| A5 | 交接档路径在新会话沙箱内可读 | 实跑（**未验证**，见 §10.1） | 实现中 | 改存工作区内 |
+| A6 | `sessionTitle.rename()` 在新会话上生效且不被自动刷新覆盖 | 实跑（**未验证**，见 §10.1） | 实现中 | 不改标题（标题只是给人看的路标，不影响链） |
 | A7 | `inject` 数组的服务键名 | **已验证**（2026-10-06）：真名 = `tools` / `sessionController` / `sessionTitle` / `sessionProjections`（**复数**）/ `settings` / `llm`，6 键 inject 声明后 `ctx[k] !== undefined` 且源码 `super(ctx,"…")` 双确认（详见 `docs/notes/dsh-api-notes.md` §2） | 已完成 | — |
-| A8 | `system-prompt/assemble` 是 waterfall 且第三方可追加内容 | **已验证（源码级，Task 9）**：`dsh-system-prompt/lib/index.js:355` 的 `ctx.waterfall(scopeTarget(this, scope), "system-prompt/assemble", assembly, context, …)`；载荷是 `assembly` 对象（不是字符串），监听签名 `(assembly, context, next)`，追加 = 往 `assembly.sections` 推新 section。`ctx.systemPrompt.append()` **不存在**（方法只有 `section/context/tools/variable/assemble/…`）。见 `docs/notes/dsh-api-notes.md` §7 | 已完成 | 退回"只写审计 + 工具返回值"，agent 仅在调工具时看到 |
-| A9 | 能取到当前模型的上下文上限（供算百分比） | **已验证（源码级，Task 9）**：`dsh-llm/lib/index.js:2098` `async resolveModelInfo(provider, model, signal)`，返回 `context.contextWindow`（`:2124`，**嵌套字段、非顶层**）；`usage` 字段为 camelCase `inputTokens/outputTokens`（`typert.host.js:529`）。取不到就**不提醒**。见 notes §8 | 已完成 | **不提醒**（不许猜分母） |
+| A8 | `system-prompt/assemble` 是 waterfall 且第三方可追加内容 | **已验证（源码级，Task 9）**：`dsh-system-prompt/lib/index.js:355` 的 `ctx.waterfall(scopeTarget(this, scope), "system-prompt/assemble", assembly, context, …)`；载荷是 `assembly` 对象（不是字符串），监听签名 `(assembly, context, next)`，追加 = 往 `assembly.sections` 推新 section。`ctx.systemPrompt.append()` **不存在**（方法只有 `section/context/tools/variable/assemble/…`）。见 `docs/notes/dsh-api-notes.md` §7；**端到端未验证**（见 §10.1） | 已完成 | 退回"只写审计 + 工具返回值"，agent 仅在调工具时看到 |
+| A9 | 能取到当前模型的上下文上限（供算百分比） | **已验证（源码级，Task 9）**：`dsh-llm/lib/index.js:2098` `async resolveModelInfo(provider, model, signal)`，返回 `context.contextWindow`（`:2124`，**嵌套字段、非顶层**）；`usage` 字段为 camelCase `inputTokens/outputTokens`（`typert.host.js:529`）。取不到就**不提醒**。见 notes §8；**端到端未验证**（见 §10.1） | 已完成 | **不提醒**（不许猜分母） |
 | A10 | 新增插件行的生效时机（配置树 vs 插件代码） | **已验证**（2026-10-06）：`dsh plugin add` 后 `--dump-config` **立即**出 `- id: hello`，但**插件代码要到下次 boot 才加载**（详见 `docs/notes/dsh-api-notes.md` §5） | 已完成 | 影响"改了插件代码怎么生效"的操作预期——必须 boot 一次，不能指望热加载 |
 | A11 | `ctx.inject(deps, cb)` 迟绑定可用（服务就绪后回调、缺服务则静默不注册） | **已验证（源码级，Task 9）**：cordis `ctx.inject(deps, cb)` = `plugin({ inject: deps, apply: cb })`；真例 `dsh-plugin-notify-sound/lib/index.js:22`（顶层 `inject=[]`）+`:47`（`ctx.inject(['settings'], …)`）。本项目 `llm` 照此迟绑定，不写进顶层 `inject`。见 notes §9 | 已完成 | 退回可选链 + 把该服务写进顶层 `inject`（代价：缺服务会导致整个插件不激活） |
+
+### 10.1 端到端实测（Task 10，2026-10-06）
+
+**结论：headless 路线不可用，端到端无人值守未跑通（BLOCKED）。**
+
+- 安装：`dsh plugin --profile headless add <项目路径>` 成功，配置树出现 `- id: dajiangjun`。
+- 驱动：`dsh headless "<task>"` 默认模型路由 `deepseek-official` 报 `MISSING_CREDENTIAL`（本机无 `DEEPSEEK_API_KEY`）；用 `--patch` 把 `agent-default-model` 改到 `deepseek-account` 后可跑出 LLM 结果。
+- **卡点**：即使模型可驱动，插件仍不激活——`dajiangjun (dsh-dajiangjun): pending (waiting for service: sessionController)`。headless 配置树**没有** `@deepseek-ai/dsh-api-session-controller`（`sessionController` 服务），该服务是 web 客户端（`dsh.client.platform: "web"`，经 `dsh-api-gateway/client` 走 HTTP）；headless 是"无 Host / 无 HTTP / 无浏览器"的一次性 agent 驱动器，二者架构不相容。插件顶层 `inject` 硬依赖 `sessionController`，故 `steward_relay` 工具从未注册，真链（建会话 / 投递 / 新会话自开工）不可达。
+- 三条失败注入（投递前杀进程 / 不存在档路径 / 只读源会话）**全部未验证**：工具未注册，任何注入都无从触发。
+- **Step 5（上 desktop profile）未执行**：按 Task 10 的额外门，端到端未跑通前不把未经验证的插件装进使用者正在用的宿主意愿。
 
 ---
 
