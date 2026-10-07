@@ -183,35 +183,58 @@ test('回写档头：三个键进「头部」段，且重复执行不堆叠', as
 
 const ncfg = { enabled: true, cooldownMinutes: 20, dailyCap: 10, growthStepPct: 5, quietFrom: 23, quietTo: 7 }
 
+/** 造一条 `notify` 审计行（shouldNotify 只关心这几个字段）。 */
+const row = (ts, pct, sessionId = 's1', result = 'sent') =>
+  ({ ts, actionId: 'notify', dryRun: false, result, sessionId, pct })
+
 test('开关关 → 不提醒', () => {
-  assert.equal(shouldNotify({}, { now: new Date('2026-10-06T12:00:00'), pct: 0.9, config: { ...ncfg, enabled: false } }), false)
+  const v = shouldNotify([], { now: new Date('2026-10-06T12:00:00'), pct: 0.9, sessionId: 's1', config: { ...ncfg, enabled: false } })
+  assert.equal(v.ok, false)
 })
 
 test('首次越限提醒；未涨 5 个百分点不重复', () => {
-  const now = new Date('2026-10-06T12:00:00')
-  assert.equal(shouldNotify({}, { now, pct: 0.72, config: ncfg }), true)
-  const st = { lastPct: 0.72, lastAt: new Date('2026-10-06T11:00:00').toISOString(), todayCount: 1, today: '2026-10-06' }
-  assert.equal(shouldNotify(st, { now, pct: 0.74, config: ncfg }), false)
-  assert.equal(shouldNotify(st, { now, pct: 0.78, config: ncfg }), true)
+  const now = new Date('2026-10-06T12:00:00Z')
+  assert.equal(shouldNotify([], { now, pct: 0.72, sessionId: 's1', config: ncfg }).ok, true)
+  const rows = [row('2026-10-06T11:00:00.000Z', 0.72)]
+  assert.equal(shouldNotify(rows, { now, pct: 0.74, sessionId: 's1', config: ncfg }).reason, 'growth')
+  assert.equal(shouldNotify(rows, { now, pct: 0.78, sessionId: 's1', config: ncfg }).ok, true)
 })
 
 test('冷却期内不提醒', () => {
-  const now = new Date('2026-10-06T12:00:00')
-  const st = { lastPct: 0.70, lastAt: new Date('2026-10-06T11:50:00').toISOString(), todayCount: 1, today: '2026-10-06' }
-  assert.equal(shouldNotify(st, { now, pct: 0.90, config: ncfg }), false)
+  const now = new Date('2026-10-06T12:00:00Z')
+  const rows = [row('2026-10-06T11:50:00.000Z', 0.70)]
+  assert.equal(shouldNotify(rows, { now, pct: 0.90, sessionId: 's1', config: ncfg }).reason, 'cooldown')
 })
 
-test('日上限封顶', () => {
-  const now = new Date('2026-10-06T12:00:00')
-  const st = { lastPct: 0.70, lastAt: new Date('2026-10-06T10:00:00').toISOString(), todayCount: 10, today: '2026-10-06' }
-  assert.equal(shouldNotify(st, { now, pct: 0.95, config: ncfg }), false)
+test('日上限封顶（全局，按天计）', () => {
+  const now = new Date('2026-10-06T12:00:00Z')
+  const rows = [
+    row('2026-10-06T10:00:00.000Z', 0.70),
+    ...Array.from({ length: 9 }, (_, i) => row(`2026-10-06T10:0${i}:00.000Z`, 0.70, `s${i + 2}`)),
+  ]
+  assert.equal(rows.length, 10)
+  assert.equal(shouldNotify(rows, { now, pct: 0.95, sessionId: 's1', config: ncfg }).reason, 'daily-cap')
 })
 
 test('免打扰时段不提醒', () => {
-  const st = {}
-  assert.equal(shouldNotify(st, { now: new Date('2026-10-06T23:30:00'), pct: 0.9, config: ncfg }), false)
-  assert.equal(shouldNotify(st, { now: new Date('2026-10-06T03:00:00'), pct: 0.9, config: ncfg }), false)
-  assert.equal(shouldNotify(st, { now: new Date('2026-10-06T07:00:00'), pct: 0.9, config: ncfg }), true)
+  assert.equal(shouldNotify([], { now: new Date('2026-10-06T23:30:00'), pct: 0.9, sessionId: 's1', config: ncfg }).reason, 'quiet')
+  assert.equal(shouldNotify([], { now: new Date('2026-10-06T03:00:00'), pct: 0.9, sessionId: 's1', config: ncfg }).reason, 'quiet')
+  assert.equal(shouldNotify([], { now: new Date('2026-10-06T07:00:00'), pct: 0.9, sessionId: 's1', config: ncfg }).ok, true)
+})
+
+test('★ 会话之间互不抑制（spec §13.3「同一会话」）★', () => {
+  const now = new Date('2026-10-06T12:00:00Z')
+  // s1 刚刚提醒过；s2 从未提醒过。s2 的**首次**提醒不得被 s1 的状态吃掉。
+  // 这条正是"全局单文件状态"会挂掉的地方，也是本插件常态运行态（源会话与「续」会话并存）。
+  const rows = [row('2026-10-06T11:59:00.000Z', 0.85, 's1')]
+  assert.equal(shouldNotify(rows, { now, pct: 0.72, sessionId: 's1', config: ncfg }).ok, false, 's1 应被冷却挡住')
+  assert.equal(shouldNotify(rows, { now, pct: 0.72, sessionId: 's2', config: ncfg }).ok, true, 's2 的首次提醒被别的会话吞了')
+})
+
+test('suppressed 行不参与计数（否则抑制会自己把自己喂饱）', () => {
+  const now = new Date('2026-10-06T12:00:00Z')
+  const rows = [row('2026-10-06T11:59:00.000Z', 0.9, 's1', 'suppressed')]
+  assert.equal(shouldNotify(rows, { now, pct: 0.72, sessionId: 's1', config: ncfg }).ok, true)
 })
 
 test('提醒文案含百分比与工具名', () => {
