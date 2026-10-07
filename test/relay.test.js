@@ -56,6 +56,13 @@ test('反例三：段标题不是逐字匹配 → 拒', () => {
   assert.ok(r.errors.some((e) => e.includes('下一步')))
 })
 
+test('头部缺主线 → 拒（spec §4 头部必须含主线）', () => {
+  const bad = GOOD.replace('主线: 大管家\n', '')
+  const r = validateDoc(bad)
+  assert.equal(r.ok, false)
+  assert.ok(r.errors.some((e) => e.includes('主线')), '头部缺主线没被拦 → 主线名靠猜文件名 fail-open')
+})
+
 test('主线名取值序：段1 → 文件名 → null', () => {
   const fromSection = parseDoc(GOOD)
   assert.equal(resolveMainline(fromSection, 'whatever.md'), '大管家')
@@ -107,7 +114,7 @@ test('命中项不回显命中内容', () => {
   assert.equal(JSON.stringify(r).includes(secret), false)
 })
 
-import { MODE_SEQ, dedupeKey, evaluateGates, permissionOk } from '../lib/relay.js'
+import { MODE_SEQ, evaluateGates, permissionOk } from '../lib/relay.js'
 
 const cfg = { enabled: true, rateLimitMinutes: 20, failureLimit: 2, notify: {} }
 const base = {

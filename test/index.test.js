@@ -164,6 +164,31 @@ test('失败注入 #2：docPath 不存在 → 拒、退出码 5、零新会话�
   assert.equal(rows[0].dryRun, false, '缺省 dryRun:true 之外的显式调用应记 dryRun:false')
 })
 
+test('子代理判据：header.parentSession 存在 → 拒（caller，退出码 2）', async () => {
+  const { docPath } = tempHome()
+  const ctx = fakeCtx()
+  apply(ctx, Config({ enabled: true }))
+  // 必须经由 isSubagentCaller 本身：子会话的判据是 header.parentSession，不是 exec.parent。
+  const res = await ctx.registered.execute(
+    { docPath },
+    { agent: { id: 'session-src', session: { header: { parentSession: 'session-parent' } } } },
+  )
+  assert.equal(res.kind, 'rejected')
+  assert.equal(res.gate, 'caller', '子代理（header.parentSession）没被拦 → 白名单形同虚设')
+  assert.equal(res.exitCode, 2)
+})
+
+test('主会话判据：header 无 parentSession → 不是子代理（走预览）', async () => {
+  const { docPath } = tempHome()
+  const ctx = fakeCtx()
+  apply(ctx, Config({ enabled: true }))
+  const res = await ctx.registered.execute(
+    { docPath },
+    { agent: { id: 'session-src', session: { header: {} } } },
+  )
+  assert.equal(res.kind, 'preview')
+})
+
 // ---- 真执行路径（dispatchRelay）----
 
 const CFG = Config({ enabled: true, lockTtlMs: 30000 })
@@ -234,6 +259,68 @@ test('权限投影读不到（resolveAgent 返回 { error }）→ 拒、退出�
   assert.equal(res.gate, 'permission')
   assert.equal(calls.includes('prompt'), false, '权限读不到却仍然投递了')
   assert.equal(readAudit(home, 2, new Date()).some((r) => r.gate === 'permission'), true, '权限闸没留审计行')
+})
+
+test('建会话传源会话的 cwd（不靠 process.cwd() 碰巧一致）', async () => {
+  const { docPath } = tempHome()
+  const ctx = fakeCtx({
+    sessionController: {
+      create: async (req) => { ctx.calls.push(['create', req]); return { sessionId: 'session-new' } },
+      resolveAgent: async (id) => ({ agent: { session: { id, header: { cwd: 'E:/src-cwd' } } } }),
+    },
+  })
+  await dispatchRelay(ctx, CFG, callArgs(docPath))
+  const createCall = ctx.calls.find((c) => c[0] === 'create')
+  assert.equal(createCall[1].cwd, 'E:/src-cwd', '建会话没传源会话的 cwd → 新会话 cwd 漂到 process.cwd()')
+})
+
+test('权限降级：源 danger-full-access → 新 workspace-write → 拒、退出码 5、不投递', async () => {
+  const { home, docPath } = tempHome()
+  const calls = []
+  const ctx = fakeCtx({
+    sessionController: {
+      create: async () => { calls.push('create'); return { sessionId: 'session-new' } },
+      resolveAgent: async (id) => { calls.push('resolveAgent'); return { agent: { session: { id, header: { cwd: 'E:/x' } } } } },
+      prompt: async () => { calls.push('prompt'); return { accepted: true } },
+    },
+    sessionProjections: {
+      stateOf: (session) => (session.id === 'session-src' ? 'danger-full-access' : 'workspace-write'),
+    },
+  })
+  const res = await dispatchRelay(ctx, CFG, callArgs(docPath))
+  assert.equal(res.kind, 'partial')
+  assert.equal(res.exitCode, 5)
+  assert.equal(res.gate, 'permission')
+  assert.equal(calls.includes('prompt'), false, '权限降级却仍然投递了')
+  assert.equal(readAudit(home, 2, new Date()).some((r) => r.gate === 'permission'), true)
+})
+
+test('create 之后失败（prompt 抛错）→ 退出码 3、点名已建会话', async () => {
+  const { docPath } = tempHome()
+  const ctx = fakeCtx({
+    sessionController: {
+      create: async () => ({ sessionId: 'session-new' }),
+      resolveAgent: async (id) => ({ agent: { session: { id, header: { cwd: 'E:/x' } } } }),
+      prompt: async () => { throw new Error('boom') },
+    },
+  })
+  const res = await dispatchRelay(ctx, CFG, callArgs(docPath))
+  assert.equal(res.kind, 'partial')
+  assert.equal(res.exitCode, 3)
+  assert.ok(res.message.includes('session-new'), '失败发生在 create 之后，必须点名那个会话')
+})
+
+test('create 失败 → 退出码 1', async () => {
+  const { docPath } = tempHome()
+  const ctx = fakeCtx({
+    sessionController: {
+      create: async () => { throw new Error('create boom') },
+      resolveAgent: async (id) => ({ agent: { session: { id, header: { cwd: 'E:/x' } } } }),
+    },
+  })
+  const res = await dispatchRelay(ctx, CFG, callArgs(docPath))
+  assert.equal(res.kind, 'partial')
+  assert.equal(res.exitCode, 1)
 })
 
 // ---- 主动提醒（spec §13）----
