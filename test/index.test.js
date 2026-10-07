@@ -1,9 +1,9 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { Config, apply } from '../lib/index.js'
+import { Config, apply, dispatchRelay } from '../lib/index.js'
 import { readAudit } from '../lib/store.js'
 
 const GOOD_DOC = `# 头部
@@ -119,4 +119,53 @@ test('总开关关闭时拒且零写操作', async () => {
 test('新 home 的审计流水为空', () => {
   const { home } = tempHome()
   assert.deepEqual(readAudit(home, 2, new Date()), [])
+})
+
+// ---- 真执行路径（dispatchRelay）----
+
+const CFG = Config({ enabled: true, lockTtlMs: 30000 })
+
+const callArgs = (docPath, i = 0) => ({
+  mainline: '大管家',
+  relayId: `relay-session-src-20261006120${i}`,
+  docPath,
+  sourceSessionId: 'session-src',
+  text: GOOD_DOC,
+})
+
+test('投递必须用 queue，绝不能用 inject', async () => {
+  const { home, docPath } = tempHome()
+  const ctx = fakeCtx()
+  const res = await dispatchRelay(ctx, CFG, callArgs(docPath))
+
+  assert.equal(res.kind, 'dispatched')
+  const promptCall = ctx.calls.find((c) => c[0] === 'prompt')
+  assert.ok(promptCall, '没有发起投递')
+  assert.equal(promptCall[1].mode, 'queue')
+  assert.notEqual(promptCall[1].mode, 'inject')
+  assert.equal(readAudit(home, 2, new Date()).some((r) => r.result === 'dispatched'), true)
+})
+
+test('单飞：同一源会话并发 10 次，只有 1 次真执行', async () => {
+  const { docPath } = tempHome()
+  const ctx = fakeCtx()
+  const results = await Promise.all(
+    Array.from({ length: 10 }, (_, i) => dispatchRelay(ctx, CFG, callArgs(docPath, i))),
+  )
+  assert.equal(results.filter((r) => r.kind === 'dispatched').length, 1)
+  assert.equal(results.filter((r) => r.exitCode === 0).length, 10, '抢不到锁的必须静默退出码 0')
+  assert.equal(ctx.calls.filter((c) => c[0] === 'create').length, 1, '只许建一个会话')
+})
+
+test('回写档头：三个键进「头部」段，且重复执行不堆叠', async () => {
+  const { docPath } = tempHome()
+  const ctx = fakeCtx()
+  await dispatchRelay(ctx, CFG, callArgs(docPath))
+  const first = readFileSync(docPath, 'utf8')
+  assert.ok(/^\s*链:\s*relay-session-src-/m.test(first))
+  assert.ok(/^\s*接手会话:\s*session-new\s*$/m.test(first))
+
+  await dispatchRelay(ctx, CFG, callArgs(docPath, 1))
+  const second = readFileSync(docPath, 'utf8')
+  assert.equal((second.match(/^\s*链:/gm) ?? []).length, 1, '链键被堆叠了')
 })
