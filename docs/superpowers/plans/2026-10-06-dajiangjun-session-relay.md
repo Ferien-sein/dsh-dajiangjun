@@ -1424,16 +1424,20 @@ export const Config = z.object({
   }).default({}),
 })
 
+// 必填标在**属性**上，不能写在根节点：dsh-tools@0.2.0-rc.2 的 value schema DSL
+// 对根任务设 allowRequired:false，根级 `required` 会被 assertAuthorKeys 抛
+// "schema.required is not supported by the value schema DSL"；而 defineTool 内部是 eager 编译的，
+// 所以这个错会在 apply() 当场炸，不是等到首次调用。属性级的 `required: true` 会经
+// property 任务装配成同一个根 `required` 数组——产物与直接写根 required 逐字节等价（Ruling 21）。
 const OUTPUT = {
   type: 'object',
   properties: {
-    kind: { type: 'string' },
-    exitCode: { type: 'number' },
+    kind: { type: 'string', required: true },
+    exitCode: { type: 'number', required: true },
     gate: { type: 'string' },
     relayId: { type: 'string' },
-    message: { type: 'string' },
+    message: { type: 'string', required: true },
   },
-  required: ['kind', 'exitCode', 'message'],
   additionalProperties: false,
 }
 
