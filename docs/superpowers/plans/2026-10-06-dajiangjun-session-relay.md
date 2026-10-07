@@ -1309,7 +1309,11 @@ function fakeCtx(overrides = {}) {
     sessionController: {
       create: async (req) => { calls.push(['create', req]); return { sessionId: 'session-new' } },
       prompt: async (req) => { calls.push(['prompt', req]); return { accepted: true } },
-      resolveAgent: async (id) => { calls.push(['resolveAgent', id]); return { session: { id } } },
+      // ⚠️ 真实返回形状是 **{ agent } 或 { error } 的包装，不是 agent 本身**。
+      // 早期这里写成 `{ session: { id } }`（照控制方的错误假设），于是**代码与替身互相印证、一起错**：
+      // 53 条单测全绿、5 轮独立审查全过，却测了一个**不存在的 API 形状**，直到端到端才炸。
+      // 这就是"替身照实现写"这种做法的代价——它是本项目最想避免的"假绿"。
+      resolveAgent: async (id) => { calls.push(['resolveAgent', id]); return { agent: { session: { id } } } },
     },
     sessionTitle: { rename: async (s, t) => { calls.push(['rename', t]); return { title: t, eventSeq: 1 } } },
     sessionProjections: { stateOf: () => 'workspace-write' },
@@ -1458,6 +1462,12 @@ async function runRelay(ctx, config, args, exec) {
   try {
     text = readFileSync(args.docPath, 'utf8')
   } catch {
+    // spec §5：每道闸都必须留审计行（带原因）。这里以前直接 return 不落审计，
+    // 端到端实测才暴露——"读不到档"是闸门拒绝，不是无事发生。
+    appendAudit(home, {
+      ts: new Date().toISOString(), actor: 'agent', actionId: 'relay', dryRun,
+      result: 'rejected', gate: 'doc', reason: 'doc-unreadable', sourceSessionId,
+    })
     return { kind: 'rejected', exitCode: 5, gate: 'doc', message: `读不到交接档：${args.docPath}` }
   }
 
@@ -1628,6 +1638,24 @@ test('回写档头：三个键进「头部」段，且重复执行不堆叠', as
   assert.equal((second.match(/^\s*接手会话:/gm) ?? []).length, 1, '接手会话键被堆叠了')
   assert.equal((second.match(/^\s*已交接:/gm) ?? []).length, 1, '已交接键被堆叠了')
 })
+
+test('权限投影读不到（resolveAgent 返回 { error }）→ 拒、退出码 5、不投递', async () => {
+  const { home, docPath } = tempHome()
+  const calls = []
+  const ctx = fakeCtx({
+    sessionController: {
+      create: async () => { calls.push('create'); return { sessionId: 'session-new' } },
+      resolveAgent: async () => { calls.push('resolveAgent'); return { error: { code: 'session/not-found' } } },
+      prompt: async () => { calls.push('prompt'); return { accepted: true } },
+    },
+  })
+  const res = await dispatchRelay(ctx, CFG, callArgs(docPath))
+  assert.equal(res.kind, 'partial')
+  assert.equal(res.exitCode, 5)
+  assert.equal(res.gate, 'permission')
+  assert.equal(calls.includes('prompt'), false, '权限读不到却仍然投递了')
+  assert.equal(readAudit(home, 2, new Date()).some((r) => r.gate === 'permission'), true, '权限闸没留审计行')
+})
 ```
 
 在 `test/index.test.js` 顶部的导入里补上 `readFileSync`：
@@ -1684,14 +1712,19 @@ export async function dispatchRelay(ctx, config, { mainline, relayId, docPath, s
     newId = created.sessionId
 
     // ⑧ 权限回读断言（R-2：走序表）
-    const srcAgent = await ctx.sessionController.resolveAgent(sourceSessionId)
-    const dstAgent = await ctx.sessionController.resolveAgent(newId)
-    const sourceMode = ctx.sessionProjections.stateOf(srcAgent.session, 'sandboxMode') ?? 'workspace-write'
-    const targetMode = ctx.sessionProjections.stateOf(dstAgent.session, 'sandboxMode') ?? 'workspace-write'
-    if (!permissionOk(sourceMode, targetMode)) {
-      audit({ result: 'failed', gate: 'permission', newSessionId: newId })
+    // ⚠️ `resolveAgent()` 返回 `{ agent }` 或 `{ error }` 的包装，**不是 agent 本身**。
+    // 端到端实测：写成 `.session` 会得到 undefined → `stateOf` 抛 "reading 'header'"，
+    // 而单测因为 fakeCtx 也照错的形状写，全程绿。见 docs/notes/dsh-api-notes.md §11。
+    const srcFound = await ctx.sessionController.resolveAgent(sourceSessionId)
+    const dstFound = await ctx.sessionController.resolveAgent(newId)
+    const modeOf = (found) =>
+      found?.agent ? ctx.sessionProjections.stateOf(found.agent.session, 'sandboxMode') : undefined
+    const sourceMode = modeOf(srcFound)
+    const targetMode = modeOf(dstFound)
+    if (!sourceMode || !targetMode || !permissionOk(sourceMode, targetMode)) {
+      audit({ result: 'failed', gate: 'permission', newSessionId: newId, sourceMode, targetMode })
       // 只报不收拾：归档不可逆（spec §1 N9）
-      return { kind: 'partial', exitCode: 5, relayId, gate: 'permission', message: `权限降级（源 ${sourceMode} → 新 ${targetMode}），已建会话 ${newId} 但未投递。请人工处置该空会话。` }
+      return { kind: 'partial', exitCode: 5, relayId, gate: 'permission', message: `权限读取失败或降级（源 ${sourceMode ?? '读不到'} → 新 ${targetMode ?? '读不到'}），已建会话 ${newId} 但未投递。请人工处置该空会话。` }
     }
 
     // ⑨ 命名
