@@ -139,3 +139,23 @@ ctx.tools.register(defineTool({
 - cordis 的 `ctx.inject(deps, callback)` = `this.plugin({ inject: deps, apply: callback })`（`cordis/src/registry.ts` Plugin registry 的 `inject` 方法），语义是"依赖就绪后跑回调、缺依赖则静默不注册"。
 - 真例（本机已发布插件）：`dsh-plugin-notify-sound/lib/index.js:22` 顶层 `export const inject = []`，`:47` `ctx.inject(['settings'], (sctx) => { sctx.settings.register(...) })`，注释明确"settings 就绪后再注册；完全没有 settings 的 profile 静默不注册"。
 - 本项目照此：`llm` **不写进顶层 `inject`**，在 `apply` 里 `ctx.inject(['llm'], (sctx) => …)` 迟绑定（Ruling 8）。
+
+## 10. 端到端卡点：`sessionController` 只在 web / desktop 宿主，headless 没有（Task 10 实测）
+
+- 插件顶层 `inject = ['tools','sessionController','sessionTitle','sessionProjections']`。**`sessionController` 是硬依赖**：某个 profile 若缺它，插件整个 `apply` 不执行，`steward_relay` 工具不注册。
+- `sessionController` 由 `@deepseek-ai/dsh-api-session-controller` 提供，其 `package.json` 标 `dsh.client.platform: "web"`、`dsh.client.external: ["@deepseek-ai/dsh-api-gateway/client"]`、`dsh.client.inject: ["@deepseek-ai/dsh-api-gateway", "@deepseek-ai/dsh-client-file-upload"]`，描述为 "Session Remote commands, cold reads, and live control transport"——即 **web 客户端，经 HTTP gateway 走**。
+- **实测对照（2026-10-06）**：`dsh --profile headless --dump-config` 的树里**没有** `@deepseek-ai/dsh-api-session-controller`；`dsh --profile steward-dev --dump-config`（web 模板建的隔离 profile）**有**。
+- 后果：装进 headless 后宿主只打一行 `dajiangjun (dsh-dajiangjun): pending (waiting for service: sessionController)`，插件**静默停在 pending**、工具不出现、不报错。已写入 README「依赖与适用范围」节。
+- 推论：**端到端验收只能在 web / desktop 宿主做**（或给 headless 补一个真实 session controller + 常驻 runner，属另起方案）。
+
+## 11. web 宿主 HTTP 驱动 + `resolveAgent` 返回形状（Task 10 实测）
+
+**无人值守驱动 web 宿主（steward-dev）**：
+- 启动输出打印一次性令牌：`dsh web: http://127.0.0.1:<port>/?token=<一次性令牌>`。
+- 认证：`GET /?token=…`（303）返回 `set-cookie: dsh-auth-…`（签名 cookie，绑 host:port）→ 后续请求带该 cookie。
+- RPC：`POST /api/session/<method>`，请求体 `{"type":"client-request","rpcId":"<uuid>","method":"session/<method>","payload":{"args":{…}}}`；响应 `{"type":"server-response","rpcId","result":{"ok":true,"value":…}}`。端点 = `namespace/method`（`session/create`、`session/prompt`、`session/list`、`session/page`…）。
+- `session/create` 参数 `{ workspaceId?, cwd?, sessionId?, agentPreset? }` → `{ sessionId }`；`session/prompt` 参数 `{ requestId, sessionId, mode:'queue'|'steer', content:[{type:'text',text}] }` → `{ accepted:true }`；`session/list` 返回 `items[]`（含 `running`/`title`/`projections.values.turnOutline`）。
+
+**关键 API 形状（踩坑）**：`ctx.sessionController.resolveAgent(sessionId)` **返回 `{ agent }` 或 `{ error }` 包装**，**不是**裸 agent。源码：`SessionController.resolveAgent`（`dsh-api-session-controller/lib/index.js`）→ `ApiSessionAgentController.resolveAgent` → `resolve()`，`liveAgent()` 返回 `{ agent }`（`… : { agent }`），`resolve` 失败返回 `{ error }`。它**不是** `@Remote` 方法（远程客户端方法清单里没有它），是 host-only 内部方法。
+- 用它的正确姿势：`const { agent } = await ctx.sessionController.resolveAgent(sid)` 且先判 `if ("error" in r) …`；或直接用 `ctx.sessionController.inspect(sid)`（返回 `{ meta, events }`，不激活 agent）。
+- 本插件 `lib/index.js` `dispatchRelay` 误写成 `resolveAgent(sid).session` → `undefined` → `sessionProjections.stateOf(undefined,…)` 抛 `Cannot read properties of undefined (reading 'header')`（Task 10 端到端实跑抓到，待控制方裁定修复）。

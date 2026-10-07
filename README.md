@@ -12,6 +12,23 @@ dsh plugin --profile <profile> add '<repo>'
 
 `<profile>` 是要安装到的 DSH profile 名（例如 `desktop`）。安装后，配置树里会出现 `- id: dajiangjun`，但**出厂全关**——见下节。
 
+## 依赖与适用范围
+
+本插件在顶层 `inject` 里**硬依赖** `ctx.sessionController`（`@deepseek-ai/dsh-api-session-controller`，一个 web 客户端，经 HTTP gateway 走）。
+
+- **web / desktop 宿主有**这个服务 → 插件正常激活、注册 `steward_relay`。
+- **`headless` profile 没有**它（headless 是"无 Host / 无 HTTP / 无浏览器"的一次性 agent 驱动器）。
+
+因此**本插件不适用于 `headless` profile**。装进 headless 的表现是**静默失效**：宿主只打一行
+
+```
+dajiangjun (dsh-dajiangjun): pending (waiting for service: sessionController)
+```
+
+插件停在 `pending`，`steward_relay` 工具**不会出现**，也**不报任何错误**——必须点名这个形态，避免"装上了但什么都没发生"却无从排查。
+
+本机实测证据（2026-10-06）：`dsh --profile headless --dump-config` 的配置树里**没有** `@deepseek-ai/dsh-api-session-controller`；对照 `steward-dev`（web 模板建的隔离 profile）**有**。详见 `docs/notes/dsh-api-notes.md` §10。
+
 ## Config 字段（出厂全关）
 
 | 字段 | 类型 | 缺省 | 说明 |

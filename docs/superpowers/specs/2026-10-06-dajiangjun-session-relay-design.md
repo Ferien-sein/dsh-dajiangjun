@@ -278,9 +278,9 @@ v1 的一切都是"agent 调工具、拿文本结果"。加 `lib/client.js` 要�
 | # | 假设 | 验证方式 | 时机 | 失败退路 |
 |---|---|---|---|---|
 | A1 | 存在可用的"归档/处置空会话"API，供权限断言失败时使用 | 查 `archived-session-gate` 与 `sessionController` 方法清单；**未验证**（端到端，见 §10.1） | 实现前 | 不建会话前先断言源会话档位；若预判会降级则**根本不建**，代价是漏掉"配置说 A 实际发 B"这一种情形 |
-| A2 | `agents.ensureSession()` 会连带挂上活代理（spike 残留风险） | 隔离 profile 实跑（**未验证**，见 §10.1） | 实现中 | `prompt` 前显式确认会话可解析出 agent；不行则改用 `ctx.agents.create()` 低层 API |
+| A2 | `agents.ensureSession()` 会连带挂上活代理（spike 残留风险） | 隔离 profile 实跑（**部分验证**：`create()` 确建出活会话；但 `resolveAgent()` 返回 `{ agent }` 包装被误当 agent 用，见 §10.1） | 实现中 | `prompt` 前显式确认会话可解析出 agent；不行则改用 `ctx.agents.create()` 低层 API |
 | A3 | 最小插件能装进隔离 profile 并拉起 | **已验证**（2026-10-06）：`dsh-hello` 装进 `steward-dev`，`dsh plugin list` 可见、`--dump-config` 出 `- id: hello`、boot 正常。新增插件：配置树立即生效，插件代码下次 boot 才加载（详见 `docs/notes/dsh-api-notes.md` §5） | 已完成 | 退回外部脚本 + HTTP（但需 GUI 令牌，成本高） |
-| A4 | 投递后新会话自动开工 | **已验证（源码级）**，见决策稿 spike 结果；实跑复核（**未验证**，见 §10.1） | 实现中 | 退回"建好会话 + 通知所有者点一下" |
+| A4 | 投递后新会话自动开工 | **已验证（源码级）**，见决策稿 spike 结果；实跑复核（**未验证**：投递在权限断言一步因 `resolveAgent` bug 中断，见 §10.1） | 实现中 | 退回"建好会话 + 通知所有者点一下" |
 | A5 | 交接档路径在新会话沙箱内可读 | 实跑（**未验证**，见 §10.1） | 实现中 | 改存工作区内 |
 | A6 | `sessionTitle.rename()` 在新会话上生效且不被自动刷新覆盖 | 实跑（**未验证**，见 §10.1） | 实现中 | 不改标题（标题只是给人看的路标，不影响链） |
 | A7 | `inject` 数组的服务键名 | **已验证**（2026-10-06）：真名 = `tools` / `sessionController` / `sessionTitle` / `sessionProjections`（**复数**）/ `settings` / `llm`，6 键 inject 声明后 `ctx[k] !== undefined` 且源码 `super(ctx,"…")` 双确认（详见 `docs/notes/dsh-api-notes.md` §2） | 已完成 | — |
@@ -291,13 +291,27 @@ v1 的一切都是"agent 调工具、拿文本结果"。加 `lib/client.js` 要�
 
 ### 10.1 端到端实测（Task 10，2026-10-06）
 
-**结论：headless 路线不可用，端到端无人值守未跑通（BLOCKED）。**
+**结论：headless 不可用；web（steward-dev）路线可无人值守驱动，但真链在投递前一步因一处代码 bug 中断（BLOCKED，待控制方裁定）。**
 
-- 安装：`dsh plugin --profile headless add <项目路径>` 成功，配置树出现 `- id: dajiangjun`。
-- 驱动：`dsh headless "<task>"` 默认模型路由 `deepseek-official` 报 `MISSING_CREDENTIAL`（本机无 `DEEPSEEK_API_KEY`）；用 `--patch` 把 `agent-default-model` 改到 `deepseek-account` 后可跑出 LLM 结果。
-- **卡点**：即使模型可驱动，插件仍不激活——`dajiangjun (dsh-dajiangjun): pending (waiting for service: sessionController)`。headless 配置树**没有** `@deepseek-ai/dsh-api-session-controller`（`sessionController` 服务），该服务是 web 客户端（`dsh.client.platform: "web"`，经 `dsh-api-gateway/client` 走 HTTP）；headless 是"无 Host / 无 HTTP / 无浏览器"的一次性 agent 驱动器，二者架构不相容。插件顶层 `inject` 硬依赖 `sessionController`，故 `steward_relay` 工具从未注册，真链（建会话 / 投递 / 新会话自开工）不可达。
-- 三条失败注入（投递前杀进程 / 不存在档路径 / 只读源会话）**全部未验证**：工具未注册，任何注入都无从触发。
-- **Step 5（上 desktop profile）未执行**：按 Task 10 的额外门，端到端未跑通前不把未经验证的插件装进使用者正在用的宿主意愿。
+**headless 路线（不可用）**：
+- `dsh plugin --profile headless add <项目路径>` 成功，配置树出现 `- id: dajiangjun`。
+- 默认模型路由 `deepseek-official` 报 `MISSING_CREDENTIAL`（本机无 `DEEPSEEK_API_KEY`）；`--patch` 切 `deepseek-account` 后可跑出 LLM 结果。
+- 但插件 `pending (waiting for service: sessionController)`：headless 配置树**没有** `@deepseek-ai/dsh-api-session-controller`（web 客户端，需常驻 HTTP host）。插件顶层 `inject` 硬依赖它 → `steward_relay` 工具未注册。
+
+**web（steward-dev）路线（可驱动，真链中断在投递前）**：
+- `steward-dev`（web 模板建的隔离 profile）**有** `sessionController`。启动输出打印一次性令牌 `dsh web: http://127.0.0.1:19399/?token=…`。
+- 认证可复现：`GET /?token=…` 拿签名 cookie → `POST /api/session/{create,prompt,list,page}` 走 Typert RPC；实测 `create`/`prompt`/`list`/`page` 全部 HTTP 200。
+- 插件激活、`steward_relay` 注册成功（`enabled: true` 经 `cordis.patch.yml` 覆盖）。
+- **真链实测**（审计 `~/.dsh/steward/audit/2026-10.jsonl` 原始行）：
+  - 预览 → `result: "preview"`（`dryRun: true`），**无新会话** ✅
+  - 真执行 → `create()` 建出新会话（`newSessionId` 已写），随后在**权限回读断言**一步失败：`result: "failed"`，`error: "Cannot read properties of undefined (reading 'header')"` ❌
+- **根因（代码 bug）**：`lib/index.js` `dispatchRelay` 把 `ctx.sessionController.resolveAgent(sid)` 的返回值当 agent 直接读 `.session`；但该 API 返回 `{ agent }`（或 `{ error }`）包装，`.session` 恒为 `undefined` → `sessionProjections.stateOf(undefined, 'sandboxMode')` 抛错。正确应为 `.agent.session` 并处理 `{ error }` 分支。
+
+**失败注入**：
+- #2（`docPath` 不存在）✅ 已复现：工具返回 `读不到交接档：…`（`gate: 'doc'` 分支），**零新会话**。**但该拒绝路径不写审计行**（`readFileSync` catch 直接 return，未 `appendAudit`）——与 §5「每道闸留一行审计」不符，第二处实现问题。
+- #1（投递前杀进程）、#3（只读源会话）**未验证**：被上面的 `resolveAgent` bug 挡在投递前，无法复现。
+
+**Step 5（上 desktop profile）未执行**：端到端真链未跑通（投递失败），按额外门不装 desktop。
 
 ---
 
