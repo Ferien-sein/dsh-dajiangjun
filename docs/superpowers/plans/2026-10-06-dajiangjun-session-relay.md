@@ -1843,10 +1843,27 @@ test('★ 会话之间互不抑制（spec §13.3「同一会话」）★', () =>
   assert.equal(shouldNotify(rows, { now, pct: 0.72, sessionId: 's2', config: ncfg }).ok, true, 's2 的首次提醒被别的会话吞了')
 })
 
-test('suppressed 行不参与计数（否则抑制会自己把自己喂饱）', () => {
-  const now = new Date('2026-10-06T12:00:00')
+test('suppressed 行不进 growth/日上限 计数，但**参与冷却**', () => {
+  const now = new Date('2026-10-06T12:00:00Z')
   const rows = [row('2026-10-06T11:59:00.000Z', 0.9, 's1', 'suppressed')]
-  assert.equal(shouldNotify(rows, { now, pct: 0.72, sessionId: 's1', config: ncfg }).ok, true)
+  // 1 分钟前刚记过一行 suppressed → 本条被冷却挡成 'cooldown'（静默跳过，不再写行）
+  assert.equal(shouldNotify(rows, { now, pct: 0.72, sessionId: 's1', config: ncfg }).reason, 'cooldown')
+  // 20 分钟后再来：冷却过了，且 growth 只跟 sent 比（没有 sent 行）→ 放行
+  const later = new Date('2026-10-06T12:30:00Z')
+  assert.equal(shouldNotify(rows, { now: later, pct: 0.72, sessionId: 's1', config: ncfg }).ok, true)
+})
+
+test('★ 免打扰期内不许每条消息都写一行（抑制本身不得刷屏）★', () => {
+  const quiet = new Date('2026-10-06T23:30:00') // 本地时间，getHours() 用本地
+  // 第一条越限：判为 quiet，由 handler 记一行 suppressed
+  assert.equal(shouldNotify([], { now: quiet, pct: 0.9, sessionId: 's1', config: ncfg }).reason, 'quiet')
+  // 紧接着的第二条：必须被冷却挡成 'cooldown'，而不是再写一行 suppressed
+  const rows = [row(quiet.toISOString(), 0.9, 's1', 'suppressed')]
+  const next = new Date(quiet.getTime() + 60_000)
+  assert.equal(shouldNotify(rows, { now: next, pct: 0.91, sessionId: 's1', config: ncfg }).reason, 'cooldown')
+  // 冷却窗口过后才允许再记一行 → 免打扰期内最多每 20 分钟一行，有界
+  const after = new Date(quiet.getTime() + 21 * 60_000)
+  assert.equal(shouldNotify(rows, { now: after, pct: 0.92, sessionId: 's1', config: ncfg }).reason, 'quiet')
 })
 
 test('提醒文案含百分比与工具名', () => {
@@ -1893,18 +1910,24 @@ function inQuietHours(hour, from, to) {
  */
 export function shouldNotify(rows, { now, pct, sessionId, config }) {
   if (config.enabled !== true) return { ok: false, reason: 'disabled' }
-  const sent = (rows ?? []).filter((r) => r.actionId === 'notify' && r.result === 'sent' && r.dryRun !== true)
-  const mine = sent
-    .filter((r) => r.sessionId === sessionId)
-    .sort((a, b) => String(a.ts).localeCompare(String(b.ts)))
-  const last = mine[mine.length - 1]
+  const byTs = (a, b) => String(a.ts).localeCompare(String(b.ts))
+  const notify = (rows ?? []).filter((r) => r.actionId === 'notify' && r.dryRun !== true)
+  const mine = notify.filter((r) => r.sessionId === sessionId).sort(byTs)
+  const lastSent = mine.filter((r) => r.result === 'sent').pop()
+  const lastAny = mine[mine.length - 1]
 
-  if (last && pct - last.pct < config.growthStepPct / 100) return { ok: false, reason: 'growth' }
-  if (last && (now.getTime() - new Date(last.ts).getTime()) / 60000 < config.cooldownMinutes) {
+  // growth 只跟**已发出**的提醒比
+  if (lastSent && pct - lastSent.pct < config.growthStepPct / 100) return { ok: false, reason: 'growth' }
+  // 冷却跟**任何一行 notify**比（含 suppressed）。这是抑制刷屏的关键：
+  // 若冷却也只跟 sent 比，免打扰期内 sent 永不前进 → 冷却恒满足 → **每条越限消息都写一行 suppressed**，
+  // 审计流水无界增长（8 小时活跃期可近千行，而审计是永久保留的）。抑制机制自己刷屏是自相矛盾的。
+  if (lastAny && (now.getTime() - new Date(lastAny.ts).getTime()) / 60000 < config.cooldownMinutes) {
     return { ok: false, reason: 'cooldown' }
   }
   const today = dayKey(now)
-  if (sent.filter((r) => dayKey(r.ts) === today).length >= config.dailyCap) return { ok: false, reason: 'daily-cap' }
+  if (notify.filter((r) => r.result === 'sent' && dayKey(r.ts) === today).length >= config.dailyCap) {
+    return { ok: false, reason: 'daily-cap' }
+  }
   if (inQuietHours(now.getHours(), config.quietFrom, config.quietTo)) return { ok: false, reason: 'quiet' }
   return { ok: true }
 }
