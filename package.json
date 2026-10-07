@@ -3,6 +3,25 @@
   "version": "0.1.0",
   "description": "大管家 — DeepSeek Harness 的会话接力：写档、建会话、投递、让新会话自己开工。",
   "private": true,
+  "license": "MIT",
+  "author": "Ferien-sein",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Ferien-sein/dsh-dajiangjun.git"
+  },
+  "homepage": "https://github.com/Ferien-sein/dsh-dajiangjun#readme",
+  "bugs": {
+    "url": "https://github.com/Ferien-sein/dsh-dajiangjun/issues"
+  },
+  "keywords": [
+    "dsh-plugin",
+    "deepseek-harness",
+    "dsh",
+    "session-relay",
+    "handoff",
+    "context-limit",
+    "cordis"
+  ],
   "type": "module",
   "main": "./lib/index.js",
   "types": "./lib/types/index.d.ts",
@@ -11,7 +30,7 @@
     "./package.json": "./package.json"
   },
   "dsh": { "bundle": { "patch": "./cordis.patch.yml" } },
-  "files": ["lib", "cordis.patch.yml", "README.md"],
+  "files": ["lib", "cordis.patch.yml", "README.md", "README.en.md", "LICENSE"],
   "scripts": { "test": "node --test" },
   "peerDependencies": {
     "@deepseek-ai/cordis": "~4.0.4",
